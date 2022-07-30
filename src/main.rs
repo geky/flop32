@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(unused_variables)]
 
 
 // crc32c stuff
@@ -104,7 +103,7 @@ fn find_parity<B: AsRef<[u8]>>(blocks: &[B]) -> (u32, u32) {
     let mut p = if blocks.len() & 1 != 0 { BLOCK_NULLCRC } else { 0 };
     let mut q = 0;
     let mut g = 1;
-    for (i, b) in blocks.iter().map(|b| b.as_ref()).enumerate() {
+    for b in blocks.iter().map(|b| b.as_ref()) {
         let crc = crc32c(0, b);
         p ^= crc;
         q ^= gmul32(crc, g);
@@ -140,76 +139,52 @@ fn find_inflection<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
     let (mut b_lq, mut b_rq) = (0, b_q);
     let mut g = 1;
 
+    let mut prev_b_crc = 0;
+    let mut prev_g = 1;
+
     for i in 0..a.len() {
         let a_crc = crc32c(0, a[i].as_ref());
         let b_crc = crc32c(0, b[i].as_ref());
+
+        // found inflection?
+        if a_lp == b_rp {
+            // calculate what bi and ai+1 should be
+            //
+            //      (q - Σ di*g^i) - (p - Σ di)*g^y
+            //         i!=x,y           i!=x,y
+            // dx = -------------------------------
+            //                 g^x - g^y
+            //
+            let mut expected_prev_b_crc = 0;
+            if i > 0 {
+                expected_prev_b_crc = gdiv32(
+                    (q^a_lq^b_rq^b_lq^gmul32(prev_b_crc, prev_g)^a_rq^gmul32(a_crc, g))
+                        ^ gmul32(b_lp^prev_b_crc^a_rp^a_crc, g),
+                    g^prev_g
+                );
+                if expected_prev_b_crc != prev_b_crc {
+                    return Some((i, Some(i-1)));
+                }
+            }
+
+            // dy = p - Σ di - dx
+            //        i!=x,y
+            //
+            let expected_a_crc = b_lp^a_rp^prev_b_crc^a_crc^expected_prev_b_crc;
+            if expected_a_crc != a_crc {
+                return Some((i, Some(i)));
+            }
+            
+            return Some((i, None));
+        }
+
+        prev_b_crc = b_crc;
+        prev_g = g;
+
         a_rp ^= a_crc;
         b_rp ^= b_crc;
         a_rq ^= gmul32(a_crc, g);
         b_rq ^= gmul32(b_crc, g);
-
-        // found inflection?
-        if a_crc == a_lp ^ b_rp {
-            // calculate what bi and ai+1 should be
-            //
-            //      (q - Σ di*g^i) - (p - Σ di)*g^y
-            //         i!=x,y           i!=x,y
-            // dx = -------------------------------
-            //                 g^x - g^y
-            //
-            let gn = gmul32(g, GF2P32_G);
-            let an_crc = crc32c(0, a[i+1].as_ref());
-            let expected_b_crc = gdiv32(
-                (q^a_lq^gmul32(a_crc, g)^b_rq^b_lq^a_rq^gmul32(an_crc, gn))
-                    ^ gmul32(b_lp^a_rp^an_crc, gn),
-                g^gn
-            );
-            if expected_b_crc != b_crc {
-                return Some((i+1, Some(i)));
-            }
-
-            // dy = p - Σ di - dx
-            //        i!=x,y
-            //
-            let expected_an_crc = b_lp^a_rp^an_crc^expected_b_crc;
-            if expected_an_crc != an_crc {
-                return Some((i+1, Some(i+1)));
-            }
-            
-            return Some((i+1, None));
-        }
-
-        // found other inflection?
-        // NOTE this is not needed if we only ever swap in one direction
-        if b_crc == b_lp ^ a_rp {
-            // calculate what bi and ai+1 should be
-            //
-            //      (q - Σ di*g^i) - (p - Σ di)*g^y
-            //         i!=x,y           i!=x,y
-            // dx = -------------------------------
-            //                 g^x - g^y
-            //
-            let gn = gmul32(g, GF2P32_G);
-            let bn_crc = crc32c(0, b[i+1].as_ref());
-            let expected_a_crc = gdiv32(
-                (q^b_lq^gmul32(b_crc, g)^a_rq^a_lq^b_rq^gmul32(bn_crc, gn))
-                    ^ gmul32(a_lp^b_rp^bn_crc, gn),
-                g^gn
-            );
-            if expected_a_crc != a_crc {
-                return Some((i+1, Some(i)));
-            }
-
-            // dy = p - Σ di - dx
-            //        i!=x,y
-            //
-            let expected_bn_crc = a_lp^b_rp^bn_crc^expected_a_crc;
-            if expected_bn_crc != bn_crc {
-                return Some((i+1, Some(i+1)));
-            }
-            
-            return Some((i+1, None));
-        }
 
         a_lp ^= a_crc;
         b_lp ^= b_crc;
@@ -218,7 +193,46 @@ fn find_inflection<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
         g = gmul32(g, GF2P32_G);
     }
 
-    unreachable!();
+    // the only other situation is if our last parity block is corrupt
+    Some((a.len(), Some(a.len()-1)))
+}
+
+fn fix_inflection<B1: AsMut<[u8]>+AsRef<[u8]>, B2: AsMut<[u8]>+AsRef<[u8]>>(
+    a: &mut [B1],
+    b: &mut [B2],
+    q: u32,
+) -> bool {
+    debug_assert!(a.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(b.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
+    debug_assert_eq!(a.len(), b.len());
+
+    let (inflection, error) = match find_inflection(a, b, q) {
+        Some(x) => x,
+        None => {
+            return false;
+        }
+    };
+
+    // complete swaps
+    for i in inflection..b.len() {
+        b[i].as_mut().swap_with_slice(a[i].as_mut());
+    }
+
+    // fix error?
+    if let Some(error) = error {
+        let (head, tail) = b.split_at_mut(error);
+        let (d, tail) = tail.split_first_mut().unwrap();
+        let d = d.as_mut();
+
+        d.fill(0);
+        for b in head.iter().chain(tail.iter()).map(|b| b.as_ref()) {
+            for i in 0..BLOCK_SIZE {
+                d[i] ^= b[i];
+            }
+        }
+    }
+
+    true
 }
 
 
@@ -334,4 +348,114 @@ fn main() {
     println!("b = {}", blocks(&b_));
     assert_ne!(find_parity(&b_).0, 0);
     println!("inflection = {:?}", find_inflection(&a_, &b_, q));
+
+    b_[2].fill(0xff);
+    fix_inflection(&mut a_, &mut b_, q);
+
+    println!("fixed:");
+    println!("a = {}", blocks(&a_));
+    assert_eq!(find_parity(&a_).0, 0);
+    println!("b = {}", blocks(&b_));
+    assert_eq!(find_parity(&b_).0, 0);
+    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
+
+    // simulate each step of a swap
+    fn sim_swap<'a, B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
+        a: &'a [B1],
+        b: &'a [B2],
+    ) -> impl Iterator<Item=(Vec<Vec<u8>>, Vec<Vec<u8>>)> + 'a {
+        let mut a = a.iter().map(|a| a.as_ref().to_owned()).collect::<Vec<_>>();
+        let mut b = b.iter().map(|b| b.as_ref().to_owned()).collect::<Vec<_>>();
+        (0..a.len()).flat_map(move |i| {
+            let mut steps = vec![];
+            let t = a[i].clone();
+            a[i].fill(0xff);
+            steps.push((a.clone(), b.clone()));
+            a[i] = b[i].clone();
+            steps.push((a.clone(), b.clone()));
+            b[i].fill(0xff);
+            steps.push((a.clone(), b.clone()));
+            b[i] = t;
+            steps.push((a.clone(), b.clone()));
+            steps
+        })
+    }
+
+    println!();
+    println!("simulating...");
+    println!();
+    println!();
+    println!();
+    for (mut a_, mut b_) in sim_swap(&a, &b) {
+        print!("\x1b[3A");
+        println!("\x1b[Ka = {}", blocks(&a_));
+        println!("\x1b[Kb = {}", blocks(&b_));
+        println!("\x1b[Kinflection = {:?}", find_inflection(&a_, &b_, q));
+
+        fix_inflection(&mut a_, &mut b_, q);
+        if a_ != b || b_ != a {
+            println!("fixed:");
+            println!("a = {}", blocks(&a_));
+            println!("b = {}", blocks(&b_));
+            println!();
+            assert!(a_ == b);
+            assert!(b_ == a);
+            break;
+        }
+    }
+
+    println!();
+    println!("permutations...");
+    println!();
+    println!();
+    println!();
+    println!();
+    println!();
+    println!();
+    for a_perm in 0..2u32.pow(4) {
+        for b_perm in 0..2u32.pow(4) {
+            let mut a = [
+                if a_perm & 1 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                if a_perm & 2 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                if a_perm & 4 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                if a_perm & 8 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                [0; BLOCK_SIZE],
+            ];
+            let mut b = [
+                if b_perm & 1 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                if b_perm & 2 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                if b_perm & 4 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                if b_perm & 8 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
+                [0; BLOCK_SIZE],
+            ];
+            mkparity(&mut a);
+            mkparity(&mut b);
+            let q =  find_parity(&a).1 ^ find_parity(&b).1;
+            print!("\x1b[6A");
+            println!("\x1b[Ka = {}", blocks(&a));
+            println!("\x1b[Kb = {}", blocks(&b));
+            println!("\x1b[Ksimulating...");
+            println!();
+            println!();
+            println!();
+
+            for (mut a_, mut b_) in sim_swap(&a, &b) {
+                print!("\x1b[3A");
+                println!("\x1b[Ka = {}", blocks(&a_));
+                println!("\x1b[Kb = {}", blocks(&b_));
+                println!("\x1b[Kinflection = {:?}", find_inflection(&a_, &b_, q));
+
+                fix_inflection(&mut a_, &mut b_, q);
+                if a_ != b || b_ != a {
+                    println!("fixed:");
+                    println!("a = {}", blocks(&a_));
+                    println!("b = {}", blocks(&b_));
+                    println!();
+                    assert!(a_ == b);
+                    assert!(b_ == a);
+                    break;
+                }
+            }
+        }
+    }
 }
