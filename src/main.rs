@@ -212,6 +212,106 @@ fn fix_swap<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
 }
 
 
+#[derive(Debug, Clone)]
+enum Error {
+    CorruptA(usize),
+    CorruptB(usize),
+    Parity,
+}
+
+/// Find a single-block error
+fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
+    a: &[A],
+    b: &[B],
+    h: (Sha256, Sha256),
+) -> Option<Error> {
+    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert_eq!(a.len(), b.len());
+    let (p, q) = h;
+
+    // first thing first, do we have any errors?
+    let (mut p_, mut q_) = mkhash(&a, &b);
+    if p_ == p && q_ == q {
+        return None;
+    }
+
+    // subtract from p and q
+    p_ = p - p_;
+    q_ = q - q_;
+
+    // scan again trying to find the point where we left off the swap
+    let mut g0 = Sha256::one();
+    let mut g1 = g0 * Sha256::G;
+    for i in 0..a.len() {
+        let a_hash = hash(i, a[i].as_ref());
+        let b_hash = hash(i, b[i].as_ref());
+
+        // a[x] = error?
+        if a_hash == p_ - ((q_ - a_hash*g0) / g0) {
+            return Some(Error::CorruptA(i));
+        }
+
+        // b[x] = error?
+        if b_hash == p_ - ((q_ - b_hash*g1) / g1) {
+            return Some(Error::CorruptB(i));
+        }
+
+        g0 = g1 * Sha256::G;
+        g1 = g0 * Sha256::G;
+    }
+
+    // if we reach here our parity hashes must be corrupt
+    Some(Error::Parity)
+}
+
+fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
+    a: &mut [A],
+    b: &mut [B],
+    p: &[u8],
+    h: (Sha256, Sha256),
+) -> bool {
+    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(p.len(), BLOCK_SIZE);
+
+    // fix corruptions?
+    match find_error(a, b, h) {
+        Some(Error::CorruptA(i)) => {
+            a[i].as_mut().copy_from_slice(p);
+            for i_ in 0..a.len() {
+                for j in 0..BLOCK_SIZE {
+                    if i_ != i {
+                        a[i].as_mut()[j] ^= a[i_].as_ref()[j];
+                    }
+                    a[i].as_mut()[j] ^= b[i_].as_ref()[j];
+                }
+            }
+            true
+        }
+        Some(Error::CorruptB(i)) => {
+            b[i].as_mut().copy_from_slice(p);
+            for i_ in 0..a.len() {
+                for j in 0..BLOCK_SIZE {
+                    b[i].as_mut()[j] ^= a[i_].as_ref()[j];
+                    if i_ != i {
+                        b[i].as_mut()[j] ^= b[i_].as_ref()[j];
+                    }
+                }
+            }
+            true
+        }
+        Some(Error::Parity) => {
+            true
+        }
+        None => {
+            false
+        }
+    }
+}
+
+
 // emulate all steps of a swap
 fn swap<'a, A: AsRef<[u8]>, B: AsRef<[u8]>>(
     a: &'a [A],
@@ -234,6 +334,31 @@ fn swap<'a, A: AsRef<[u8]>, B: AsRef<[u8]>>(
     }
 
     steps.into_iter()
+}
+
+// emulate single block errors
+fn errors<'a, A: AsRef<[u8]>, B: AsRef<[u8]>>(
+    a: &'a [A],
+    b: &'a [B],
+) -> impl Iterator<Item=(Vec<Vec<u8>>, Vec<Vec<u8>>)> + 'a {
+    let mut a = a.iter().map(|a| a.as_ref().to_owned()).collect::<Vec<_>>();
+    let mut b = b.iter().map(|b| b.as_ref().to_owned()).collect::<Vec<_>>();
+
+    let mut errors = vec![];
+    for i in 0..a.len() {
+        let t = a[i].clone();
+        a[i].fill(0xff);
+        errors.push((a.clone(), b.clone()));
+        a[i] = t; 
+    }
+    for i in 0..b.len() {
+        let t = b[i].clone();
+        b[i].fill(0xff);
+        errors.push((a.clone(), b.clone()));
+        b[i] = t; 
+    }
+
+    errors.into_iter()
 }
 
 
@@ -409,9 +534,30 @@ fn main() {
     for (i, (mut a_, mut b_)) in swap(&a, &b).enumerate() {
         writeln!(log, "step {}:", i).unwrap();
         writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
-        writeln!(log, "swap = {:?}", find_swap(&a_, &b_, h)).unwrap();
+        writeln!(log, "found = {:?}", find_swap(&a_, &b_, h)).unwrap();
 
         fix_swap(&mut a_, &mut b_, &p, h);
+        writeln!(log, "fixed:").unwrap();
+        writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+        log.reset();
+
+        if !((a_ == b && b_ == a) || (a_ == a && b_ == b)) {
+            drop(log);
+            panic!("failure");
+        }
+    }
+
+    drop(log);
+    println!();
+
+    // try every single block error
+    let mut log = BackgroundLog::new();
+    for (i, (mut a_, mut b_)) in errors(&a, &b).enumerate() {
+        writeln!(log, "error {}:", i).unwrap();
+        writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+        writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
+
+        fix_error(&mut a_, &mut b_, &p, h);
         writeln!(log, "fixed:").unwrap();
         writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
         log.reset();
@@ -438,14 +584,43 @@ fn main() {
         mkparity(&a, &b, &mut p);
         let h = mkhash(&a, &b);
 
+        // try every step in a swap
         for (i, (mut a_, mut b_)) in swap(&a, &b).enumerate() {
             writeln!(log, "{}-block permutations {}/{}:", 8, perm, 8u32.pow(8)).unwrap();
             writeln!(log, "{}", blocks(&a, &b, &p, h)).unwrap();
 
             writeln!(log, "step {}:", i).unwrap();
             writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
-            writeln!(log, "swap = {:?}", find_swap(&a_, &b_, h)).unwrap();
+            writeln!(log, "found = {:?} {:?}",
+                find_error(&a_, &b_, h),
+                find_swap(&a_, &b_, h),
+            ).unwrap();
 
+            fix_error(&mut a_, &mut b_, &p, h);
+            fix_swap(&mut a_, &mut b_, &p, h);
+            writeln!(log, "fixed:").unwrap();
+            writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+            log.reset();
+
+            if !((a_ == b && b_ == a) || (a_ == a && b_ == b)) {
+                drop(log);
+                panic!("failure");
+            }
+        }
+
+        // try every single block error
+        for (i, (mut a_, mut b_)) in errors(&a, &b).enumerate() {
+            writeln!(log, "{}-block permutations {}/{}:", 8, perm, 8u32.pow(8)).unwrap();
+            writeln!(log, "{}", blocks(&a, &b, &p, h)).unwrap();
+
+            writeln!(log, "error {}:", i).unwrap();
+            writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+            writeln!(log, "found = {:?} {:?}",
+                find_error(&a_, &b_, h),
+                find_swap(&a_, &b_, h),
+            ).unwrap();
+
+            fix_error(&mut a_, &mut b_, &p, h);
             fix_swap(&mut a_, &mut b_, &p, h);
             writeln!(log, "fixed:").unwrap();
             writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
