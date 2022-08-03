@@ -56,8 +56,8 @@ fn gf256_div(a: u8, b: u8) -> u8 {
 const BLOCK_SIZE: usize = 8;
 
 // populates
-// p = Σ a[i] + Σ a[i]
-// q = Σ a[i] g^2i + Σ b[i] g^(2i+1)
+// p = Σ a[i] g^2i + Σ a[i] g^(2i+1)
+// q = Σ a[i] g^4i + Σ b[i] g^(4i+2)
 fn mkparity<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
     a: &[B1],
     b: &[B2],
@@ -74,15 +74,19 @@ fn mkparity<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
     q.fill(0);
     let mut g0 = 1;
     let mut g1 = gf256_mul(g0, GF256_G);
+    let mut h0 = 1;
+    let mut h1 = gf256_mul(gf256_mul(h0, GF256_G), GF256_G);
     for i in 0..a.len() {
         let ai = a[i].as_ref();
         let bi = b[i].as_ref();
         for j in 0..BLOCK_SIZE {
-            p[j] ^= ai[j] ^ bi[j];
-            q[j] ^= gf256_mul(ai[j], g0) ^ gf256_mul(bi[j], g1);
+            p[j] ^= gf256_mul(ai[j], g0) ^ gf256_mul(bi[j], g1);
+            q[j] ^= gf256_mul(ai[j], h0) ^ gf256_mul(bi[j], h1);
         }
         g0 = gf256_mul(g1, GF256_G);
         g1 = gf256_mul(g0, GF256_G);
+        h0 = gf256_mul(gf256_mul(h1, GF256_G), GF256_G);
+        h1 = gf256_mul(gf256_mul(h0, GF256_G), GF256_G);
     }
 }
 
@@ -98,10 +102,10 @@ enum Swap {
 //
 // at some point this must be true
 //
-//   a[x] = p - Σ a[i] + Σ b[i]
-//              i!=x
+//   a[x] g^2x = p - Σ a[i] g^(2i+1) + Σ a[i] g^2i + Σ b[i] g^2i + Σ b[i] g^(2i+1)
+//                   i<x               i>x           i<x           i>=x
 //
-//   a[x] g^2x = q - Σ a[i] g^(2i+1) + Σ a[i] g^2i + Σ b[i] g^2i + Σ b[i] g^(2i+1)
+//   a[x] g^4x = q - Σ a[i] g^(4i+2) + Σ a[i] g^4i + Σ b[i] g^4i + Σ b[i] g^(4i+2)
 //                   i<x               i>x           i<x           i>=x
 //
 //   (a = bbbb?aaaaa)
@@ -109,11 +113,11 @@ enum Swap {
 //
 // or 
 //
-//   b[x] = p - Σ a[i] + Σ b[i]
-//                       i!=x
+//   b[x] g^(2x+1) = p - Σ a[i] g^(2i+1) + Σ a[i] g^2i + Σ b[i] g^2i + Σ b[i] g^(2i+1)
+//                       i<=x              i>x           i<x           i>x
 //
-//   b[x] g^2x = q - Σ a[i] g^(2i+1) + Σ a[i] g^2i + Σ b[i] g^2i + Σ b[i] g^(2i+1)
-//                   i<=x              i>x           i<x           i>x
+//   b[x] g^(4x+2) = q - Σ a[i] g^(4i+2) + Σ a[i] g^4i + Σ b[i] g^4i + Σ b[i] g^(4i+2)
+//                       i<=x              i>x           i<x           i>x
 //
 //   (a = bbbbbaaaaa)
 //   (b = aaaa?bbbbb)
@@ -148,17 +152,24 @@ fn find_swap<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
     // scan again trying to find the point of inflection
     let mut g0 = 1;
     let mut g1 = gf256_mul(g0, GF256_G);
+    let mut h0 = 1;
+    let mut h1 = gf256_mul(gf256_mul(h0, GF256_G), GF256_G);
     for i in 0..a.len() {
         let ai = a[i].as_ref();
         let bi = b[i].as_ref();
 
         // a[x] = inflection?
         if (0..BLOCK_SIZE).all(|j| {
-            ai[j] == p_[j] ^ gf256_div(q_[j] ^ gf256_mul(ai[j], g0), g0)
+            gf256_div(p_[j] ^ gf256_mul(ai[j], g0), g0)
+                == gf256_div(q_[j] ^ gf256_mul(ai[j], h0), h0)
         }) {
             // a[x] = corrupt?
-            if (0..BLOCK_SIZE).any(|j| p_[j] != 0) {
-                return Some(Swap::CorruptA(i, p_));
+            if (0..BLOCK_SIZE).any(|j| ai[j] != gf256_div(p_[j] ^ gf256_mul(ai[j], g0), g0)) {
+                return Some(Swap::CorruptA(i,
+                    (0..BLOCK_SIZE).map(|j| {
+                        gf256_div(p_[j] ^ gf256_mul(ai[j], g0), g0)
+                    }).collect::<Vec<_>>()
+                ));
             } else {
                 return Some(Swap::Clean(i));
             }
@@ -166,22 +177,30 @@ fn find_swap<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
 
         // b[x] = inflection?
         if (0..BLOCK_SIZE).all(|j| {
-            bi[j] == p_[j] ^ gf256_div(q_[j] ^ gf256_mul(bi[j], g1) ^ gf256_mul(ai[j], g0^g1), g0)
+            gf256_div(p_[j] ^ gf256_mul(bi[j], g1) ^ gf256_mul(ai[j], g0^g1), g0)
+                == gf256_div(q_[j] ^ gf256_mul(bi[j], h1) ^ gf256_mul(ai[j], h0^h1), h0)
         }) {
             // b[x] = corrupt?
-            if (0..BLOCK_SIZE).any(|j| p_[j] != 0) {
-                return Some(Swap::CorruptB(i, p_));
+            if (0..BLOCK_SIZE).any(|j| bi[j] != gf256_div(p_[j] ^ gf256_mul(bi[j], g1) ^ gf256_mul(ai[j], g0^g1), g0)) {
+                return Some(Swap::CorruptB(i,
+                    (0..BLOCK_SIZE).map(|j| {
+                        gf256_div(p_[j] ^ gf256_mul(bi[j], g1) ^ gf256_mul(ai[j], g0^g1), g0)
+                    }).collect::<Vec<_>>()
+                ));
             }
         }
 
         // move on to next block, need to update q assuming a and b
         // have been swapped
         for j in 0..BLOCK_SIZE {
-            q_[j] ^= gf256_mul(ai[j]^bi[j], g0) ^ gf256_mul(ai[j]^bi[j], g1);
+            p_[j] ^= gf256_mul(ai[j]^bi[j], g0) ^ gf256_mul(ai[j]^bi[j], g1);
+            q_[j] ^= gf256_mul(ai[j]^bi[j], h0) ^ gf256_mul(ai[j]^bi[j], h1);
         }
         
         g0 = gf256_mul(g1, GF256_G);
         g1 = gf256_mul(g0, GF256_G);
+        h0 = gf256_mul(gf256_mul(h1, GF256_G), GF256_G);
+        h1 = gf256_mul(gf256_mul(h0, GF256_G), GF256_G);
     }
 
     // if we reach here one of our parity blocks must be corrupt
@@ -203,15 +222,11 @@ fn fix_swap<B1: AsMut<[u8]>+AsRef<[u8]>, B2: AsMut<[u8]>+AsRef<[u8]>>(
     // fix corruptions?
     let i = match find_swap(a, b, p, q) {
         Some(Swap::CorruptA(i, p_)) => {
-            for j in 0..BLOCK_SIZE {
-                a[i].as_mut()[j] ^= p_[j];
-            }
+            a[i].as_mut().copy_from_slice(&p_);
             i
         },
         Some(Swap::CorruptB(i, p_)) => {
-            for j in 0..BLOCK_SIZE {
-                b[i].as_mut()[j] ^= p_[j];
-            }
+            b[i].as_mut().copy_from_slice(&p_);
             i+1
         },
         Some(Swap::Clean(i)) => {
@@ -253,17 +268,14 @@ fn swap<'a, B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
         a[i].fill(0xff);
         steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
         a[i] = b[i].clone();
-        if a[0] != b[0] {
-            steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
-        }
+        steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
         b[i].fill(0xff);
         steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
         b[i] = t;
-        if a[0] != b[0] {
-            steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
-        }
+        steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
     }
 
+    // TODO check these
     p.fill(0xff);
     //steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
     mkparity(&a, &b, &mut p, &mut vec![0; BLOCK_SIZE]);
@@ -431,8 +443,8 @@ fn main() {
                 println!("\x1b[Kfixed:");
                 print_blocks(&a_, &b_, &p, &q);
 
-                assert!(a_ == b);
-                assert!(b_ == a);
+                assert!(a_ == b || a_ == a);
+                assert!(b_ == a || b_ == b);
                 let mut p_ = vec![0; BLOCK_SIZE];
                 let mut q_ = vec![0; BLOCK_SIZE];
                 mkparity(&a_, &b_, &mut p_, &mut q_);
