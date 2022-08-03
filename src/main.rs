@@ -1,238 +1,279 @@
 #![allow(dead_code)]
 
 
-// crc32c stuff
-const CRC32C_TABLE: [u32; 16] = [
-    0x00000000, 0x105ec76f, 0x20bd8ede, 0x30e349b1,
-    0x417b1dbc, 0x5125dad3, 0x61c69362, 0x7198540d,
-    0x82f63b78, 0x92a8fc17, 0xa24bb5a6, 0xb21572c9,
-    0xc38d26c4, 0xd3d3e1ab, 0xe330a81a, 0xf36e6f75,
-];
+// gf(256) stuff
+const GF256_P: u16 = 0x11d;
+const GF256_G: u8 = 0x2;
 
-const fn crc32c(crc: u32, data: &[u8]) -> u32 {
-    let mut crc_ = crc ^ 0xffffffff;
+const GF256_TABLES: ([u8; 256], [u8; 256]) = {
+    let mut tables = ([0; 256], [0; 256]);
+    let mut x: u16 = 1;
+    let mut i: u16 = 0;
+    while i < 256 {
+        tables.0[x as usize] = i as u8;
+        tables.1[i as usize] = x as u8;
 
-    let mut i = 0;
-    while i < data.len() {
-        crc_ = (crc_ >> 4) ^ CRC32C_TABLE[(((crc_ as u8) ^ (data[i] >> 0)) & 0xf) as usize];
-        crc_ = (crc_ >> 4) ^ CRC32C_TABLE[(((crc_ as u8) ^ (data[i] >> 0)) & 0xf) as usize];
+        x = x << 1;
+        if x > 255 {
+            x ^= GF256_P;
+        }
         i += 1;
     }
 
-    crc_ ^ 0xffffffff
-}
-
-
-// gf(2^32) stuff
-const GF2P32_P: u32 = 0x000000af;
-const GF2P32_G: u32 = 0x2;
-
-const GF2P32_B: u32 = {
-    let mut a = 1u128 << 64;
-    let b = (1u128 << 32) | (GF2P32_P as u128);
-    let mut x = 0u128;
-    while a.leading_zeros() <= b.leading_zeros() {
-        x ^= 1 << (b.leading_zeros()-a.leading_zeros());
-        a ^= b << (b.leading_zeros()-a.leading_zeros());
-    }
-    x as u32
+    tables.0[0] = 255; // log(0) = undefined
+    tables.0[1] = 0;   // log(1) = 0
+    tables
 };
+const GF256_LOG: [u8; 256] = GF256_TABLES.0;
+const GF256_EXP: [u8; 256] = GF256_TABLES.1;
 
-fn pmul32(a: u32, b: u32) -> (u32, u32) {
-    let mut lo = 0;
-    let mut hi = 0;
-    for i in 0..32 {
-        let mask = (((a as i32) << (31-i)) >> 31) as u32;
-        lo ^= mask & (b << i);
-        hi ^= mask & (b >> (31-i));
+fn gf256_mul(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 {
+        return 0;
     }
-    (lo, hi >> 1)
-}
 
-fn gmul32(a: u32, b: u32) -> u32 {
-    // via Barret reduction
-    let (lo, hi) = pmul32(a, b);
-    lo ^ pmul32(pmul32(hi, GF2P32_B).1 ^ hi, GF2P32_P).0
-}
-
-fn gpow32(a: u32, x: usize) -> u32 {
-    let mut a_ = a;
-    let mut x_ = x;
-    let mut p = 1;
-    loop {
-        if x_ & 1 != 0 {
-            p = gmul32(p, a_);
-        }
-
-        x_ >>= 1;
-        if x_ == 0 {
-            return p;
-        }
-        a_ = gmul32(a_, a_);
+    match GF256_LOG[a as usize].overflowing_add(GF256_LOG[b as usize]) {
+        (x, true) => GF256_EXP[x.wrapping_sub(255) as usize],
+        (x, false) => GF256_EXP[x as usize],
     }
 }
 
-fn gdiv32(a: u32, b: u32) -> u32 {
+fn gf256_div(a: u8, b: u8) -> u8 {
     assert_ne!(b, 0);
-    gmul32(a, gpow32(b, (u32::MAX-1) as usize))
+    if a == 0 {
+        return 0;
+    }
+
+    match GF256_LOG[a as usize].overflowing_add(255-GF256_LOG[b as usize]) {
+        (x, true) => GF256_EXP[x.wrapping_sub(255) as usize],
+        (x, false) => GF256_EXP[x as usize],
+    }
 }
 
 
-// parity stuff, assumes last block is parity block
+
+// parity stuff
 const BLOCK_SIZE: usize = 8;
-const BLOCK_NULLCRC: u32 = crc32c(0, &[0; BLOCK_SIZE]);
 
-fn mkparity<B: AsMut<[u8]>+AsRef<[u8]>>(blocks: &mut [B]) {
-    debug_assert!(blocks.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
-
-    let (p, blocks) = blocks.split_last_mut().unwrap();
-    let p = p.as_mut();
-
-    p.fill(0);
-    for b in blocks.iter().map(|b| b.as_ref()) {
-        for i in 0..BLOCK_SIZE {
-            p[i] ^= b[i];
-        }
-    }
-}
-
-
-fn find_parity<B: AsRef<[u8]>>(blocks: &[B]) -> (u32, u32) {
-    debug_assert!(blocks.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
-
-    let mut p = if blocks.len() & 1 != 0 { BLOCK_NULLCRC } else { 0 };
-    let mut q = 0;
-    let mut g = 1;
-    for b in blocks.iter().map(|b| b.as_ref()) {
-        let crc = crc32c(0, b);
-        p ^= crc;
-        q ^= gmul32(crc, g);
-        g = gmul32(g, GF2P32_G);
-    }
-    (p, q)
-}
-
-fn find_inflection<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
+// populates
+// p = Σ a[i] + Σ a[i]
+// q = Σ a[i] g^2i + Σ b[i] g^(2i+1)
+fn mkparity<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
     a: &[B1],
     b: &[B2],
-    q: u32,
-) -> Option<(usize, Option<usize>)> {
-    debug_assert!(a.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
-    debug_assert!(b.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
+    p: &mut [u8],
+    q: &mut [u8],
+) {
+    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(p.len(), BLOCK_SIZE);
+    debug_assert_eq!(q.len(), BLOCK_SIZE);
 
-    let (a_p, a_q) = find_parity(a);
-    let (b_p, b_q) = find_parity(b);
-    // no errors?
-    if a_p == 0 && b_p == 0 {
-        return None
-    }
-
-    // at some point this must be true:
-    //
-    // ax = Σai + Σbi
-    //     i<x   i>x
-    //
-    let (mut a_lp, mut a_rp) = (0, a_p);
-    let (mut b_lp, mut b_rp) = (0, b_p);
-    let (mut a_lq, mut a_rq) = (0, a_q);
-    let (mut b_lq, mut b_rq) = (0, b_q);
-    let mut g = 1;
-
-    let mut prev_b_crc = 0;
-    let mut prev_g = 1;
-
+    p.fill(0);
+    q.fill(0);
+    let mut g0 = 1;
+    let mut g1 = gf256_mul(g0, GF256_G);
     for i in 0..a.len() {
-        let a_crc = crc32c(0, a[i].as_ref());
-        let b_crc = crc32c(0, b[i].as_ref());
-
-        // found inflection?
-        if a_lp == b_rp {
-            // calculate what bi and ai+1 should be
-            //
-            //      (q - Σ di*g^i) - (p - Σ di)*g^y
-            //         i!=x,y           i!=x,y
-            // dx = -------------------------------
-            //                 g^x - g^y
-            //
-            let mut expected_prev_b_crc = 0;
-            if i > 0 {
-                expected_prev_b_crc = gdiv32(
-                    (q^a_lq^b_rq^b_lq^gmul32(prev_b_crc, prev_g)^a_rq^gmul32(a_crc, g))
-                        ^ gmul32(b_lp^prev_b_crc^a_rp^a_crc, g),
-                    g^prev_g
-                );
-                if expected_prev_b_crc != prev_b_crc {
-                    return Some((i, Some(i-1)));
-                }
-            }
-
-            // dy = p - Σ di - dx
-            //        i!=x,y
-            //
-            let expected_a_crc = b_lp^a_rp^prev_b_crc^a_crc^expected_prev_b_crc;
-            if expected_a_crc != a_crc {
-                return Some((i, Some(i)));
-            }
-            
-            return Some((i, None));
+        let ai = a[i].as_ref();
+        let bi = b[i].as_ref();
+        for j in 0..BLOCK_SIZE {
+            p[j] ^= ai[j] ^ bi[j];
+            q[j] ^= gf256_mul(ai[j], g0) ^ gf256_mul(bi[j], g1);
         }
-
-        prev_b_crc = b_crc;
-        prev_g = g;
-
-        a_rp ^= a_crc;
-        b_rp ^= b_crc;
-        a_rq ^= gmul32(a_crc, g);
-        b_rq ^= gmul32(b_crc, g);
-
-        a_lp ^= a_crc;
-        b_lp ^= b_crc;
-        a_lq ^= gmul32(a_crc, g);
-        b_lq ^= gmul32(b_crc, g);
-        g = gmul32(g, GF2P32_G);
+        g0 = gf256_mul(g1, GF256_G);
+        g1 = gf256_mul(g0, GF256_G);
     }
-
-    // the only other situation is if our last parity block is corrupt
-    Some((a.len(), Some(a.len()-1)))
 }
 
-fn fix_inflection<B1: AsMut<[u8]>+AsRef<[u8]>, B2: AsMut<[u8]>+AsRef<[u8]>>(
+#[derive(Debug, Clone)]
+enum Swap {
+    CorruptA(usize, Vec<u8>),
+    CorruptB(usize, Vec<u8>),
+    Clean(usize),
+    Parity,
+}
+
+// find where we left off a swap
+//
+// at some point this must be true
+//
+//   a[x] = p - Σ a[i] + Σ b[i]
+//              i!=x
+//
+//   a[x] g^2x = q - Σ a[i] g^(2i+1) + Σ a[i] g^2i + Σ b[i] g^2i + Σ b[i] g^(2i+1)
+//                   i<x               i>x           i<x           i>=x
+//
+//   (a = bbbb?aaaaa)
+//   (b = aaaabbbbbb)
+//
+// or 
+//
+//   b[x] = p - Σ a[i] + Σ b[i]
+//                       i!=x
+//
+//   b[x] g^2x = q - Σ a[i] g^(2i+1) + Σ a[i] g^2i + Σ b[i] g^2i + Σ b[i] g^(2i+1)
+//                   i<=x              i>x           i<x           i>x
+//
+//   (a = bbbbbaaaaa)
+//   (b = aaaa?bbbbb)
+//
+//
+fn find_swap<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
+    a: &[B1],
+    b: &[B2],
+    p: &[u8],
+    q: &[u8],
+) -> Option<Swap> {
+    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(p.len(), BLOCK_SIZE);
+    debug_assert_eq!(q.len(), BLOCK_SIZE);
+
+    // first thing first, do we have any errors?
+    let mut p_ = vec![0; BLOCK_SIZE];
+    let mut q_ = vec![0; BLOCK_SIZE];
+    mkparity(&a, &b, &mut p_,  &mut q_);
+    if p_ == p && q_ == q {
+        return None;
+    }
+
+    // subtract from p and q
+    for j in 0..BLOCK_SIZE {
+        p_[j] ^= p[j];
+        q_[j] ^= q[j];
+    }
+
+    // scan again trying to find the point of inflection
+    let mut g0 = 1;
+    let mut g1 = gf256_mul(g0, GF256_G);
+    for i in 0..a.len() {
+        let ai = a[i].as_ref();
+        let bi = b[i].as_ref();
+
+        // a[x] = inflection?
+        if (0..BLOCK_SIZE).all(|j| {
+            ai[j] == p_[j] ^ gf256_div(q_[j] ^ gf256_mul(ai[j], g0), g0)
+        }) {
+            // a[x] = corrupt?
+            if (0..BLOCK_SIZE).any(|j| p_[j] != 0) {
+                return Some(Swap::CorruptA(i, p_));
+            } else {
+                return Some(Swap::Clean(i));
+            }
+        }
+
+        // b[x] = inflection?
+        if (0..BLOCK_SIZE).all(|j| {
+            bi[j] == p_[j] ^ gf256_div(q_[j] ^ gf256_mul(bi[j], g1) ^ gf256_mul(ai[j], g0^g1), g0)
+        }) {
+            // b[x] = corrupt?
+            if (0..BLOCK_SIZE).any(|j| p_[j] != 0) {
+                return Some(Swap::CorruptB(i, p_));
+            }
+        }
+
+        // move on to next block, need to update q assuming a and b
+        // have been swapped
+        for j in 0..BLOCK_SIZE {
+            q_[j] ^= gf256_mul(ai[j]^bi[j], g0) ^ gf256_mul(ai[j]^bi[j], g1);
+        }
+        
+        g0 = gf256_mul(g1, GF256_G);
+        g1 = gf256_mul(g0, GF256_G);
+    }
+
+    // if we reach here one of our parity blocks must be corrupt
+    Some(Swap::Parity)
+}
+
+fn fix_swap<B1: AsMut<[u8]>+AsRef<[u8]>, B2: AsMut<[u8]>+AsRef<[u8]>>(
     a: &mut [B1],
     b: &mut [B2],
-    q: u32,
+    p: &mut [u8],
+    q: &mut [u8],
 ) -> bool {
-    debug_assert!(a.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
-    debug_assert!(b.iter().all(|b| b.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
+    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(p.len(), BLOCK_SIZE);
+    debug_assert_eq!(q.len(), BLOCK_SIZE);
 
-    let (inflection, error) = match find_inflection(a, b, q) {
-        Some(x) => x,
+    // fix corruptions?
+    let i = match find_swap(a, b, p, q) {
+        Some(Swap::CorruptA(i, p_)) => {
+            for j in 0..BLOCK_SIZE {
+                a[i].as_mut()[j] ^= p_[j];
+            }
+            i
+        },
+        Some(Swap::CorruptB(i, p_)) => {
+            for j in 0..BLOCK_SIZE {
+                b[i].as_mut()[j] ^= p_[j];
+            }
+            i+1
+        },
+        Some(Swap::Clean(i)) => {
+            i
+        },
+        Some(Swap::Parity) => {
+            a.len()
+        },
         None => {
             return false;
         }
     };
 
-    // complete swaps
-    for i in inflection..b.len() {
+    // finish swap
+    for i in i..a.len() {
         b[i].as_mut().swap_with_slice(a[i].as_mut());
     }
+    mkparity(a, b, p, q);
 
-    // fix error?
-    if let Some(error) = error {
-        let (head, tail) = b.split_at_mut(error);
-        let (d, tail) = tail.split_first_mut().unwrap();
-        let d = d.as_mut();
+    true
+}
 
-        d.fill(0);
-        for b in head.iter().chain(tail.iter()).map(|b| b.as_ref()) {
-            for i in 0..BLOCK_SIZE {
-                d[i] ^= b[i];
-            }
+
+// emulate all steps of a swap
+fn swap<'a, B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
+    a: &'a [B1],
+    b: &'a [B2],
+    p: &'a [u8],
+    q: &'a [u8],
+) -> impl Iterator<Item=(Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<u8>, Vec<u8>)> + 'a {
+    let mut a = a.iter().map(|a| a.as_ref().to_owned()).collect::<Vec<_>>();
+    let mut b = b.iter().map(|b| b.as_ref().to_owned()).collect::<Vec<_>>();
+    let mut p = p.to_owned();
+    let mut q = q.to_owned();
+
+    let mut steps = vec![];
+    for i in 0..a.len() {
+        let t = a[i].clone();
+        a[i].fill(0xff);
+        steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+        a[i] = b[i].clone();
+        if a[0] != b[0] {
+            steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+        }
+        b[i].fill(0xff);
+        steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+        b[i] = t;
+        if a[0] != b[0] {
+            steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
         }
     }
 
-    true
+    p.fill(0xff);
+    //steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+    mkparity(&a, &b, &mut p, &mut vec![0; BLOCK_SIZE]);
+    //steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+    q.fill(0xff);
+    //steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+    mkparity(&a, &b, &mut vec![0; BLOCK_SIZE], &mut q);
+    //steps.push((a.clone(), b.clone(), p.to_owned(), q.to_owned()));
+
+    steps.into_iter()
 }
 
 
@@ -243,84 +284,73 @@ fn main() {
             .collect()
     }
 
-    fn blocks<B: AsRef<[u8]>>(blocks: &[B]) -> String {
-        let (p, q) = find_parity(blocks);
-        format!("{} ({:08x} {:08x})",
-            blocks.iter()
-                .map(|b| hex(b.as_ref()))
+    fn print_blocks<B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
+        a: &[B1],
+        b: &[B2],
+        p: &[u8],
+        q: &[u8]
+    ) {
+        println!("a = {} p = {}",
+            a.iter()
+                .map(|x| hex(x.as_ref()))
                 .collect::<Vec<_>>()
                 .join(" "),
-            p,
-            q,
-        )
+            hex(p)
+        );
+        println!("b = {} q = {}",
+            b.iter()
+                .map(|x| hex(x.as_ref()))
+                .collect::<Vec<_>>()
+                .join(" "),
+            hex(q)
+        );
     }
 
-    let mut a = [
+    let a = [
         [12,34,56,78,90,12,34,56],
         [78,90,12,34,56,78,90,12],
         [34,56,78,90,12,34,56,78],
         [90,12,34,56,78,90,12,34],
-        [ 0, 0, 0, 0, 0, 0, 0, 0],
     ];
-    mkparity(&mut a);
-    let a_q = find_parity(&a).1;
-
-    let mut b = [
+    let b = [
         [11,11,11,11,11,11,11,11],
         [11,11,11,11,11,11,11,11],
         [11,11,11,11,11,11,11,11],
         [11,11,11,11,11,11,11,11],
-        [ 0, 0, 0, 0, 0, 0, 0, 0],
     ];
-    mkparity(&mut b);
-    let b_q = find_parity(&b).1;
-
-    let q = a_q ^ b_q;
+    let mut p = [ 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut q = [ 0, 0, 0, 0, 0, 0, 0, 0];
+    mkparity(&a, &b, &mut p, &mut q);
 
     println!("before:");
-    println!("a = {}", blocks(&a));
-    assert_eq!(find_parity(&a).0, 0);
-    println!("b = {}", blocks(&b));
-    assert_eq!(find_parity(&b).0, 0);
-    println!("inflection = {:?}", find_inflection(&a, &b, q));
+    print_blocks(&a, &b, &p, &q);
+    println!("inflection = {:?}", find_swap(&a, &b, &p, &q));
 
     let mut a_ = a;
     let mut b_ = b;
     std::mem::swap(&mut a_[0], &mut b_[0]);
     std::mem::swap(&mut a_[1], &mut b_[1]);
-
     println!("clean swap:");
-    println!("a = {}", blocks(&a_));
-    assert_ne!(find_parity(&a_).0, 0);
-    println!("b = {}", blocks(&b_));
-    assert_ne!(find_parity(&b_).0, 0);
-    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
+    print_blocks(&a_, &b_, &p, &q);
+    println!("inflection = {:?}", find_swap(&a_, &b_, &p, &q));
 
     let mut a_ = a;
     let mut b_ = b;
     std::mem::swap(&mut a_[0], &mut b_[0]);
     std::mem::swap(&mut a_[1], &mut b_[1]);
     a_[2].fill(0xff);
-
     println!("dirty a swap:");
-    println!("a = {}", blocks(&a_));
-    assert_ne!(find_parity(&a_).0, 0);
-    println!("b = {}", blocks(&b_));
-    assert_ne!(find_parity(&b_).0, 0);
-    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
+    print_blocks(&a_, &b_, &p, &q);
+    println!("inflection = {:?}", find_swap(&a_, &b_, &p, &q));
 
     let mut a_ = a;
     let mut b_ = b;
     std::mem::swap(&mut a_[0], &mut b_[0]);
     std::mem::swap(&mut a_[1], &mut b_[1]);
     a_[2] = b_[2];
-
     println!("half swap:");
-    println!("a = {}", blocks(&a_));
-    assert_ne!(find_parity(&a_).0, 0);
-    println!("b = {}", blocks(&b_));
-    assert_ne!(find_parity(&b_).0, 0);
-    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
+    print_blocks(&a_, &b_, &p, &q);
+    println!("inflection = {:?}", find_swap(&a_, &b_, &p, &q));
 
     let mut a_ = a;
     let mut b_ = b;
@@ -328,133 +358,90 @@ fn main() {
     std::mem::swap(&mut a_[1], &mut b_[1]);
     std::mem::swap(&mut a_[2], &mut b_[2]);
     b_[2].fill(0xff);
-
     println!("dirty b swap:");
-    println!("a = {}", blocks(&a_));
-    assert_ne!(find_parity(&a_).0, 0);
-    println!("b = {}", blocks(&b_));
-    assert_ne!(find_parity(&b_).0, 0);
-    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
+    print_blocks(&a_, &b_, &p, &q);
+    println!("inflection = {:?}", find_swap(&a_, &b_, &p, &q));
 
     let mut a_ = a;
     let mut b_ = b;
     std::mem::swap(&mut a_[0], &mut b_[0]);
     std::mem::swap(&mut a_[1], &mut b_[1]);
     std::mem::swap(&mut a_[2], &mut b_[2]);
-
     println!("clean swap:");
-    println!("a = {}", blocks(&a_));
-    assert_ne!(find_parity(&a_).0, 0);
-    println!("b = {}", blocks(&b_));
-    assert_ne!(find_parity(&b_).0, 0);
-    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
-
-    b_[2].fill(0xff);
-    fix_inflection(&mut a_, &mut b_, q);
-
-    println!("fixed:");
-    println!("a = {}", blocks(&a_));
-    assert_eq!(find_parity(&a_).0, 0);
-    println!("b = {}", blocks(&b_));
-    assert_eq!(find_parity(&b_).0, 0);
-    println!("inflection = {:?}", find_inflection(&a_, &b_, q));
-
-    // simulate each step of a swap
-    fn sim_swap<'a, B1: AsRef<[u8]>, B2: AsRef<[u8]>>(
-        a: &'a [B1],
-        b: &'a [B2],
-    ) -> impl Iterator<Item=(Vec<Vec<u8>>, Vec<Vec<u8>>)> + 'a {
-        let mut a = a.iter().map(|a| a.as_ref().to_owned()).collect::<Vec<_>>();
-        let mut b = b.iter().map(|b| b.as_ref().to_owned()).collect::<Vec<_>>();
-        (0..a.len()).flat_map(move |i| {
-            let mut steps = vec![];
-            let t = a[i].clone();
-            a[i].fill(0xff);
-            steps.push((a.clone(), b.clone()));
-            a[i] = b[i].clone();
-            steps.push((a.clone(), b.clone()));
-            b[i].fill(0xff);
-            steps.push((a.clone(), b.clone()));
-            b[i] = t;
-            steps.push((a.clone(), b.clone()));
-            steps
-        })
-    }
+    print_blocks(&a_, &b_, &p, &q);
+    println!("inflection = {:?}", find_swap(&a_, &b_, &p, &q));
 
     println!();
-    println!("simulating...");
-    println!();
-    println!();
-    println!();
-    for (mut a_, mut b_) in sim_swap(&a, &b) {
-        print!("\x1b[3A");
-        println!("\x1b[Ka = {}", blocks(&a_));
-        println!("\x1b[Kb = {}", blocks(&b_));
-        println!("\x1b[Kinflection = {:?}", find_inflection(&a_, &b_, q));
 
-        fix_inflection(&mut a_, &mut b_, q);
-        if a_ != b || b_ != a {
-            println!("fixed:");
-            println!("a = {}", blocks(&a_));
-            println!("b = {}", blocks(&b_));
-            println!();
-            assert!(a_ == b);
-            assert!(b_ == a);
-            break;
+    for (i, (mut a_, mut b_, mut p, mut q)) in
+        swap(&a, &b, &p, &q).enumerate()
+    {
+        if i != 0 {
+            print!("\x1b[7A");
         }
+        println!("\x1b[Kstep {}:", i);
+        print_blocks(&a_, &b_, &p, &q);
+        println!("\x1b[Kinflection = {:?}", find_swap(&a_, &b_, &p, &q));
+
+        fix_swap(&mut a_, &mut b_, &mut p, &mut q);
+        println!("\x1b[Kfixed:");
+        print_blocks(&a_, &b_, &p, &q);
+
+        assert!(a_ == b);
+        assert!(b_ == a);
+        let mut p_ = vec![0; BLOCK_SIZE];
+        let mut q_ = vec![0; BLOCK_SIZE];
+        mkparity(&a_, &b_, &mut p_, &mut q_);
+        assert!(p == p_);
+        assert!(q == q_);
     }
 
     println!();
-    println!("permutations...");
-    println!();
-    println!();
-    println!();
-    println!();
-    println!();
-    println!();
-    for a_perm in 0..2u32.pow(4) {
-        for b_perm in 0..2u32.pow(4) {
-            let mut a = [
-                if a_perm & 1 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                if a_perm & 2 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                if a_perm & 4 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                if a_perm & 8 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                [0; BLOCK_SIZE],
-            ];
-            let mut b = [
-                if b_perm & 1 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                if b_perm & 2 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                if b_perm & 4 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                if b_perm & 8 != 0 { [10; BLOCK_SIZE] } else { [11; BLOCK_SIZE] },
-                [0; BLOCK_SIZE],
-            ];
-            mkparity(&mut a);
-            mkparity(&mut b);
-            let q =  find_parity(&a).1 ^ find_parity(&b).1;
-            print!("\x1b[6A");
-            println!("\x1b[Ka = {}", blocks(&a));
-            println!("\x1b[Kb = {}", blocks(&b));
-            println!("\x1b[Ksimulating...");
-            println!();
-            println!();
-            println!();
 
-            for (mut a_, mut b_) in sim_swap(&a, &b) {
-                print!("\x1b[3A");
-                println!("\x1b[Ka = {}", blocks(&a_));
-                println!("\x1b[Kb = {}", blocks(&b_));
-                println!("\x1b[Kinflection = {:?}", find_inflection(&a_, &b_, q));
+    // try every permutation of n unique blocks
+    for n in 2u32..8u32 {
+        for perm in 0..n.pow(8) {
+            let mut a = [[0; 8]; 4];
+            let mut b = [[0; 8]; 4];
+            let mut p = [0; 8];
+            let mut q = [0; 8];
+            for i in 0..4 {
+                a[i as usize].fill(((perm/n.pow(i+0)) % n) as u8);
+                b[i as usize].fill(((perm/n.pow(i+4)) % n) as u8);
+            }
+            mkparity(&a, &b, &mut p, &mut q);
 
-                fix_inflection(&mut a_, &mut b_, q);
-                if a_ != b || b_ != a {
-                    println!("fixed:");
-                    println!("a = {}", blocks(&a_));
-                    println!("b = {}", blocks(&b_));
-                    println!();
-                    assert!(a_ == b);
-                    assert!(b_ == a);
-                    break;
+            if perm != 0 {
+                print!("\x1b[10A");
+            }
+            println!("\x1b[K{}-block permutations {}/{}:", n, perm, n.pow(8));
+            print_blocks(&a, &b, &p, &q);
+
+            for (i, (mut a_, mut b_, mut p, mut q)) in
+                swap(&a, &b, &p, &q).enumerate()
+            {
+                if i != 0 {
+                    print!("\x1b[7A");
                 }
+                println!("\x1b[Kstep {}:", i);
+                print_blocks(&a_, &b_, &p, &q);
+                println!("\x1b[Kinflection = {:?}", find_swap(&a_, &b_, &p, &q));
+
+                fix_swap(&mut a_, &mut b_, &mut p, &mut q);
+                println!("\x1b[Kfixed:");
+                print_blocks(&a_, &b_, &p, &q);
+
+                assert!(a_ == b);
+                assert!(b_ == a);
+                let mut p_ = vec![0; BLOCK_SIZE];
+                let mut q_ = vec![0; BLOCK_SIZE];
+                mkparity(&a_, &b_, &mut p_, &mut q_);
+                assert!(p == p_);
+                assert!(q == q_);
+            }
+
+            if perm == n.pow(8)-1 {
+                println!();
             }
         }
     }
