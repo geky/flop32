@@ -175,7 +175,6 @@ fn p32x256_gcd(a: &[u8], b: &[u8]) -> [u8; 32] {
     b_[..b.len()].copy_from_slice(b);
     loop {
         let (_, r) = p32x256_divrem(&a_, &b_);
-        //println!("hm {}", hex(&r));
         if r.iter().all(|x| *x == 0) {
             return b_;
         }
@@ -212,7 +211,7 @@ fn p32x256_is_irreducible(a: &[u8]) -> (bool, u32, u32) {
         if g != [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] {
             return (false, i, 32/2);
         }
-        println!("passed {}/{} gcd({}, {}) = {}", i+1, 32/2, hex(a), hex(&x_), hex(&g));
+        //println!("passed {}/{} gcd({}, {}) = {}", i+1, 32/2, hex(a), hex(&x_), hex(&g));
     }
 
     (true, 32/2, 32/2)
