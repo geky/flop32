@@ -185,7 +185,9 @@ fn p32x256_gcd(a: &[u8], b: &[u8]) -> [u8; 32] {
     }
 }
 
-fn p32x256_is_irreducible(a: &[u8]) -> (bool, u32, u32) {
+fn p32x256_is_irreducible(
+    a: &[u8]
+) -> (bool, u32, u32, Option<([u8; 32], [u8; 32])>) {
     fn hex(xs: &[u8]) -> String {
         xs.iter()
             .map(|x| format!("{:02x}", x))
@@ -209,12 +211,11 @@ fn p32x256_is_irreducible(a: &[u8]) -> (bool, u32, u32) {
         let g = p32x256_gcd(a, &x_);
 
         if g != [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] {
-            return (false, i, 32/2);
+            return (false, i, 32/2, Some((x_, g)));
         }
-        //println!("passed {}/{} gcd({}, {}) = {}", i+1, 32/2, hex(a), hex(&x_), hex(&g));
     }
 
-    (true, 32/2, 32/2)
+    (true, 32/2, 32/2, None)
 }
 
 #[test]
@@ -225,34 +226,104 @@ fn find_irreducible() {
             .collect()
     }
 
-    let mut p: [u8; 33] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1];
-    let mut best: Option<(u32, u32, [u8; 33])> = None;
+    let thread_count = std::env::var("THREADS")
+        .map(|x| x.parse::<u8>().unwrap())
+        .unwrap_or(1);
+
+    #[derive(Debug, Clone)]
+    struct Best {
+        t: u8,
+        p: [u8; 33],
+        found: bool,
+        passed: u32,
+        needed: u32,
+        failure: Option<([u8; 32], [u8; 32])>,
+    }
+
+    use std::sync::{Arc, Mutex};
+    let last: Arc<Mutex<Option<Best>>> = Arc::new(Mutex::new(None));
+    let best: Arc<Mutex<Option<Best>>> = Arc::new(Mutex::new(None));
+
+    for t in 0..thread_count {
+        std::thread::spawn({
+            let last = last.clone();
+            let best = best.clone();
+            move || {
+                let mut p: [u8; 33] = [t,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1];
+                let mut cached_best = 0;
+                loop {
+                    let (found, passed, needed, failure) = p32x256_is_irreducible(&p);
+
+                    if p[0] == t && p[1..2].iter().all(|x| *x == 0) {
+                        *last.lock().unwrap() = Some(Best{t, p, found, passed, needed, failure});
+                    }
+
+                    if passed > cached_best {
+                        let mut best = best.lock().unwrap();
+                        if best.is_none()
+                            || passed > best.as_ref().unwrap().passed
+                            || (passed == best.as_ref().unwrap().passed
+                                && t < best.as_ref().unwrap().t)
+                        {
+                            *best = Some(Best{t, p, found, passed, needed, failure});
+                        }
+                        cached_best = best.as_ref().map(|best| best.passed).unwrap_or(0);
+                    }
+
+                    // increment p
+                    let mut carry = thread_count;
+                    for i in 0..p.len() {
+                        let (x, v) = p[i].overflowing_add(carry);
+                        p[i] = x;
+                        if !v {
+                            break;
+                        }
+                        carry = 1;
+                    }
+                }
+            }
+        });
+    }
+
+    // print in our main thread
+    let mut lines = 0;
     loop {
-        if p[..2].iter().all(|x| *x == 0) {
-            println!("testing {}...", hex(&p));
-            if let Some((passed, needed, best)) = best {
-                println!("best passed {}/{} {}", passed, needed, hex(&best));
+        if lines > 0 {
+            println!("\x1b[{}A", lines+1);
+        }
+
+        if let Some(last) = last.lock().unwrap().clone() {
+            println!("\x1b[Ktesting {}...", hex(&last.p));
+            if let Some((x, g)) = last.failure {
+                println!("\x1b[Kfailure gcd({})", hex(&x));
+                println!("\x1b[K          = {}", hex(&g));
+            } else {
+                println!("\x1b[K");
+                println!("\x1b[K");
             }
+        } else {
+            println!("\x1b[K");
+            println!("\x1b[K");
+            println!("\x1b[K");
         }
 
-        let (found, passed, needed) = p32x256_is_irreducible(&p);
-
-        if found {
-            println!("found {}!", hex(&p));
-        }
-
-        if best.is_none() || passed > best.unwrap().0 {
-            best = Some((passed, needed, p));
-        }
-
-        // increment p
-        for i in 0..p.len() {
-            let (x, carry) = p[i].overflowing_add(1);
-            p[i] = x;
-            if !carry {
-                break;
+        if let Some(best) = best.lock().unwrap().clone() {
+            println!("\x1b[Kbest passed {}/{} {}", best.passed, best.needed, hex(&best.p));
+            if let Some((x, g)) = best.failure {
+                println!("\x1b[Kfailure gcd({})", hex(&x));
+                println!("\x1b[K          = {}", hex(&g));
+            } else {
+                println!("\x1b[K");
+                println!("\x1b[K");
             }
+        } else {
+            println!("\x1b[K");
+            println!("\x1b[K");
+            println!("\x1b[K");
         }
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        lines = 6;
     }
 }
 
@@ -264,8 +335,8 @@ fn sanity() {
             .collect()
     }
 
-    let a = [1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let b = [3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let a = [1,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+    let b = [3,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
     println!("a = {}", hex(&a));
     println!("b = {}", hex(&b));
     let d = p32x256_mul(&a, &b);
