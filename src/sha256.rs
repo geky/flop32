@@ -243,31 +243,46 @@ fn find_irreducible() {
     use std::sync::{Arc, Mutex};
     let last: Arc<Mutex<Option<Best>>> = Arc::new(Mutex::new(None));
     let best: Arc<Mutex<Option<Best>>> = Arc::new(Mutex::new(None));
+    let last_best: Arc<Mutex<Option<Best>>> = Arc::new(Mutex::new(None));
 
     for t in 0..thread_count {
         std::thread::spawn({
             let last = last.clone();
             let best = best.clone();
+            let last_best = last_best.clone();
             move || {
                 let mut p: [u8; 33] = [t,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1];
                 let mut cached_best = 0;
                 loop {
                     let (found, passed, needed, failure) = p32x256_is_irreducible(&p);
 
-                    if p[0] == t && p[1..2].iter().all(|x| *x == 0) {
-                        *last.lock().unwrap() = Some(Best{t, p, found, passed, needed, failure});
+                    if let Ok(mut last) = last.try_lock() {
+                        *last = Some(Best{t, p, found, passed, needed, failure});
                     }
 
-                    if passed > cached_best {
-                        let mut best = best.lock().unwrap();
-                        if best.is_none()
-                            || passed > best.as_ref().unwrap().passed
-                            || (passed == best.as_ref().unwrap().passed
-                                && t < best.as_ref().unwrap().t)
-                        {
-                            *best = Some(Best{t, p, found, passed, needed, failure});
+                    if passed >= cached_best {
+                        if passed > cached_best {
+                            let mut best = best.lock().unwrap();
+                            if best.is_none()
+                                || passed > best.as_ref().unwrap().passed
+                                || (passed == best.as_ref().unwrap().passed
+                                    && t < best.as_ref().unwrap().t)
+                            {
+                                *best = Some(Best{t, p, found, passed, needed, failure});
+                                *last_best.lock().unwrap() = Some(Best{t, p, found, passed, needed, failure});
+                            }
+                            cached_best = best.as_ref().map(|best| best.passed).unwrap_or(0);
                         }
-                        cached_best = best.as_ref().map(|best| best.passed).unwrap_or(0);
+
+                        if passed == cached_best {
+                            let mut last_best = last_best.lock().unwrap();
+                            if last_best.is_none()
+                                || (passed == last_best.as_ref().unwrap().passed
+                                    && t >= last_best.as_ref().unwrap().t)
+                            {
+                                *last_best = Some(Best{t, p, found, passed, needed, failure});
+                            }
+                        }
                     }
 
                     // increment p
@@ -307,6 +322,21 @@ fn find_irreducible() {
             println!("\x1b[K");
         }
 
+        if let Some(last_best) = last_best.lock().unwrap().clone() {
+            println!("\x1b[Klast passed {}/{} {}", last_best.passed, last_best.needed, hex(&last_best.p));
+            if let Some((x, g)) = last_best.failure {
+                println!("\x1b[Kfailure gcd({})", hex(&x));
+                println!("\x1b[K          = {}", hex(&g));
+            } else {
+                println!("\x1b[K");
+                println!("\x1b[K");
+            }
+        } else {
+            println!("\x1b[K");
+            println!("\x1b[K");
+            println!("\x1b[K");
+        }
+
         if let Some(best) = best.lock().unwrap().clone() {
             println!("\x1b[Kbest passed {}/{} {}", best.passed, best.needed, hex(&best.p));
             if let Some((x, g)) = best.failure {
@@ -323,7 +353,7 @@ fn find_irreducible() {
         }
 
         std::thread::sleep(std::time::Duration::from_millis(10));
-        lines = 6;
+        lines = 9;
     }
 }
 
