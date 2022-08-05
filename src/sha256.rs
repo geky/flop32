@@ -162,7 +162,8 @@ fn p32x256_divrem(mut a: &[u8], mut b: &[u8]) -> ([u8; 32], [u8; 32]) {
 
     let mut div = [0; 32];
     let mut rem = [0; 32];
-    div[..a.len()-b.len()+1].copy_from_slice(&a_[b.len()-1..a.len()]);
+    use std::cmp::min;
+    div[..min(a.len()-b.len()+1, 32)].copy_from_slice(&a_[b.len()-1..min(a.len(), b.len()-1+32)]);
     rem[..b.len()-1].copy_from_slice(&a_[..b.len()-1]);
     (div, rem)
 }
@@ -174,11 +175,11 @@ fn p32x256_gcd(a: &[u8], b: &[u8]) -> [u8; 32] {
     let mut b_ = [0; 32];
     b_[..b.len()].copy_from_slice(b);
     loop {
-        let (_, r) = p32x256_divrem(&a_, &b_);
-        if r.iter().all(|x| *x == 0) {
-            return b_;
+        if b_.iter().all(|x| *x == 0) {
+            return a_[..32].try_into().unwrap();
         }
 
+        let (_, r) = p32x256_divrem(&a_, &b_);
         a_[32..].fill(0);
         a_[..32].copy_from_slice(&b_);
         b_ = r;
