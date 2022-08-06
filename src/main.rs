@@ -49,9 +49,9 @@ fn mkhash<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert_eq!(a.len(), b.len());
 
-    let mut p = Sha256::zero();
-    let mut q = Sha256::zero();
-    let mut g0 = Sha256::one();
+    let mut p = Sha256::ZERO;
+    let mut q = Sha256::ZERO;
+    let mut g0 = Sha256::ONE;
     let mut g1 = g0 * Sha256::G;
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
@@ -123,7 +123,7 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     let mut q_swapped = q_;
 
     // scan again trying to find the point where we left off the swap
-    let mut g0 = Sha256::one();
+    let mut g0 = Sha256::ONE;
     let mut g1 = g0 * Sha256::G;
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
@@ -132,7 +132,7 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
         // a[x] = swap?
         if a_hash == p_ - ((q_swapped - a_hash*g0) / g0) {
             // a[x] = corrupt?
-            if p_ != Sha256::zero() {
+            if p_ != Sha256::ZERO {
                 return Some(Error::CorruptSwapA(i));
             } else {
                 return Some(Error::CleanSwap(i));
@@ -142,7 +142,7 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
         // b[x] = swap?
         if b_hash == p_ - ((q_swapped - a_hash*(g1-g0) - b_hash*g1) / g0) {
             // b[x] = corrupt?
-            if p_ != Sha256::zero() {
+            if p_ != Sha256::ZERO {
                 return Some(Error::CorruptSwapB(i));
             }
         }
