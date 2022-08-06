@@ -112,6 +112,130 @@ fn gf256_div(a: u8, b: u8) -> u8 {
     }
 }
 
+const GF256P32_P: [u8; 33] = [
+    0xec,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x01,
+];
+const FG256P32_G: [u8; 32] = [
+    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+];
+
+fn gf256p32_mul(a: &[u8], b: &[u8]) -> [u8; 32] {
+    p32x256_divrem(&p32x256_mul(a, b), &GF256P32_P).1
+}
+
+fn gf256p32_recip(a: &[u8]) -> [u8; 32] {
+    // multiplicative inverse using extended Euclidean algorithm
+    let mut t0 = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+    let mut t1 = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+    let mut r0 = GF256P32_P;
+    let mut r1 = [0; 32];
+    r1[..a.len()].copy_from_slice(a);
+
+    while !r1.iter().all(|x| *x == 0) {
+        let (q, r) = p32x256_divrem(&r0, &r1);
+        let t = p32x256_xor(&t0, &p32x256_mul(&q, &t1)[..32]);
+        r0[r1.len()..].fill(0);
+        r0[..r1.len()].copy_from_slice(&r1);
+        r1 = r;
+        (t0, t1) = (t1, t);
+    }
+
+    // p not irreducible?
+    debug_assert!(r0[1..].iter().all(|x| *x == 0));
+
+    // scale by constant
+    for i in 0..t0.len() {
+        t0[i] = gf256_div(t0[i], r0[0]);
+    }
+
+    t0
+}
+
+fn gf256p32_div(a: &[u8], b: &[u8]) -> [u8; 32] {
+    gf256p32_mul(a, &gf256p32_recip(b))
+}
+
+#[test]
+fn test_gf256p32() {
+    fn hex(xs: &[u8]) -> String {
+        xs.iter()
+            .map(|x| format!("{:02x}", x))
+            .collect()
+    }
+
+    let a = [17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17];
+    println!("       a = {}", hex(&a));
+    println!("     1/a = {}", hex(&gf256p32_recip(&a)));
+    println!(" a*(1/a) = {}", hex(&gf256p32_mul(&a, &gf256p32_recip(&a))));
+    println!();
+
+    let b = [34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34];
+    println!("       b = {}", hex(&b));
+    println!("     a*b = {}", hex(&gf256p32_mul(&a, &b)));
+    println!(" (a*b)/b = {}", hex(&gf256p32_div(&gf256p32_mul(&a, &b), &b)));
+    println!(" (a*b)/a = {}", hex(&gf256p32_div(&gf256p32_mul(&a, &b), &a)));
+    println!();
+
+    let c = [51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51];
+    println!("       c = {}", hex(&c));
+    println!("     b+c = {}", hex(&p32x256_xor(&b, &c)));
+    println!("     a*b = {}", hex(&gf256p32_mul(&a, &b)));
+    println!("     a*c = {}", hex(&gf256p32_mul(&a, &c)));
+    println!(" a*(b+c) = {}", hex(&gf256p32_mul(&a, &p32x256_xor(&b, &c))));
+    println!(" a*b+a*c = {}", hex(&p32x256_xor(&gf256p32_mul(&a, &b), &gf256p32_mul(&a, &c))));
+    
+}
+
+#[test]
+fn test_gf256p32_more() {
+    fn hex(xs: &[u8]) -> String {
+        xs.iter()
+            .map(|x| format!("{:02x}", x))
+            .collect()
+    }
+
+    let perms = [
+        [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+        [7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7],
+        [17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],
+        [34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34],
+        [51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51],
+        [0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff],
+        [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff],
+        [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff],
+    ];
+
+    for a in perms {
+        for b in perms {
+            for c in perms {
+                assert_eq!(
+                    gf256p32_mul(&a, &gf256p32_recip(&a)),
+                    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                    "a*(1/a) = a"
+                );
+                assert_eq!(
+                    gf256p32_div(&gf256p32_mul(&a, &b), &b),
+                    a,
+                    "(a*b)/b = a"
+                );
+                assert_eq!(
+                    gf256p32_mul(&a, &p32x256_xor(&b, &c)),
+                    p32x256_xor(&gf256p32_mul(&a, &b), &gf256p32_mul(&a, &c)),
+                    "a*(b+c) = a*b+a*c"
+                );
+            }
+        }
+    }
+}
+
+
 fn p32x256_xor(a: &[u8], b: &[u8]) -> [u8; 32] {
     let mut d = [0; 32];
     for i in 0..32 {
@@ -130,7 +254,7 @@ fn p32x256_mul(a: &[u8], b: &[u8]) -> [u8; 64] {
     d
 }
 
-fn p32x256_divrem(mut a: &[u8], mut b: &[u8]) -> ([u8; 32], [u8; 32]) {
+fn p32x256_divrem(mut a: &[u8], mut b: &[u8]) -> ([u8; 64], [u8; 32]) {
     // find leading coefficients
     while a.len() > 0 && a[a.len()-1] == 0 {
         a = &a[..a.len()-1];
@@ -140,12 +264,12 @@ fn p32x256_divrem(mut a: &[u8], mut b: &[u8]) -> ([u8; 32], [u8; 32]) {
     }
     debug_assert!(b.len() != 0);
     if a.len() == 0 {
-        return ([0; 32], [0; 32]);
+        return ([0; 64], [0; 32]);
     }
     if a.len() < b.len() {
         let mut rem = [0; 32];
         rem[..a.len()].copy_from_slice(a);
-        return ([0; 32], rem);
+        return ([0; 64], rem);
     }
     let leading_coeff = b[b.len()-1];
 
@@ -160,10 +284,9 @@ fn p32x256_divrem(mut a: &[u8], mut b: &[u8]) -> ([u8; 32], [u8; 32]) {
         }
     }
 
-    let mut div = [0; 32];
+    let mut div = [0; 64];
     let mut rem = [0; 32];
-    use std::cmp::min;
-    div[..min(a.len()-b.len()+1, 32)].copy_from_slice(&a_[b.len()-1..min(a.len(), b.len()-1+32)]);
+    div[..a.len()-b.len()+1].copy_from_slice(&a_[b.len()-1..a.len()]);
     rem[..b.len()-1].copy_from_slice(&a_[..b.len()-1]);
     (div, rem)
 }
@@ -218,6 +341,70 @@ fn p32x256_is_irreducible(
     (true, (32/2)-1, (32/2)-1, None)
 }
 
+fn p32x256_is_generator(g: &[u8], p: &[u8]) -> bool {
+    if g.iter().all(|x| *x == 0) {
+        return false;
+    }
+
+    let gf256p32_mul = |a: &[u8], b: &[u8]| -> [u8; 32] {
+        p32x256_divrem(&p32x256_mul(a, b), p).1
+    };
+
+    let gf256p32_pow = |a: &[u8], hex: &str| -> [u8; 32] {
+        let mut d = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+        let mut a_ = [0; 32];
+        a_[..a.len()].copy_from_slice(a);
+        for bit in hex.chars()
+            .rev()
+            .flat_map(|nibble| {
+                let nibble = nibble.to_digit(16).unwrap();
+                (0..4).map(move |bit| nibble & (1 << bit) != 0)
+            })
+        {
+            if bit {
+                d = gf256p32_mul(&d, &a_);
+            }
+
+            a_ = gf256p32_mul(&a_, &a_);
+        }
+
+        d
+    };
+
+    // prime factors of 2^256-1
+    // 3*5*17*257*641*65537*274177*6700417*67280421310721*59649589127497217*5704689200685129054721
+    //
+    // we need to test that there are no cycles of the form (2^256-1)/m where m
+    // is each of the prime facors of 2^256-1. unfortunately these numbers are
+    // problematically large.
+    //
+    // To make them work here I've precalculated (2^256-1)/m and converted them
+    // to hex strings.
+    //
+    for cycle in [
+        "5555555555555555555555555555555555555555555555555555555555555555", // 2^256-1 / 3
+        "3333333333333333333333333333333333333333333333333333333333333333", // 2^256-1 / 5
+        "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f", // 2^256-1 / 17
+        "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff", // 2^256-1 / 257
+        "663d80ff99c27f00663d80ff99c27f00663d80ff99c27f00663d80ff99c27f", // 2^256-1 / 641
+        "ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff", // 2^256-1 / 65537
+        "3d30f19cd100ffffc2cf0e632eff00003d30f19cd100ffffc2cf0e632eff", // 2^256-1 / 274177
+        "280fffffd7f00000280fffffd7f00000280fffffd7f00000280fffffd7f", // 2^256-1 / 6700417
+        "42f00fffffffffffbd0ff0000000000042f00fffffffffffbd0ff", // 2^256-1 / 67280421310721
+        "13540775b48cc32ba00fffffffffffffecabf88a4b733cd45ff", // 2^256-1 / 59649589127497217
+        "d3eafc3af14600ffffffffffffffffff2c1503c50eb9ff", // 2^256-1 / 5704689200685129054721
+    ] {
+        // found tighter cycle?
+        if gf256p32_pow(g, cycle) == [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] {
+            return false;
+        }
+    }
+
+    // test that g^256-1 = 1
+    gf256p32_pow(g, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+        == [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}
+
 #[test]
 fn find_irreducible() {
     fn hex(xs: &[u8]) -> String {
@@ -234,9 +421,9 @@ fn find_irreducible() {
     struct Best {
         t: u8,
         p: [u8; 33],
-        found: bool,
         passed: u32,
         needed: u32,
+        generator: Option<[u8; 32]>,
         failure: Option<([u8; 32], [u8; 32])>,
     }
 
@@ -254,10 +441,21 @@ fn find_irreducible() {
                 let mut p: [u8; 33] = [t,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1];
                 let mut cached_best = 0;
                 loop {
-                    let (found, passed, needed, failure) = p32x256_is_irreducible(&p);
+                    let (found, mut passed, mut needed, failure) = p32x256_is_irreducible(&p);
+
+                    let mut generator = None;
+                    needed += 1;
+                    if found {
+                        // we know its irreducible, but is it primitive?
+                        let g = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+                        if p32x256_is_generator(&g, &p) {
+                            generator = Some(g);
+                            passed += 1;
+                        }
+                    }
 
                     if let Ok(mut last) = last.try_lock() {
-                        *last = Some(Best{t, p, found, passed, needed, failure});
+                        *last = Some(Best{t, p, passed, needed, generator, failure});
                     }
 
                     if passed >= cached_best {
@@ -267,8 +465,8 @@ fn find_irreducible() {
                             || (passed == best.as_ref().unwrap().passed
                                 && t < best.as_ref().unwrap().t)
                         {
-                            *best = Some(Best{t, p, found, passed, needed, failure});
-                            *last_best.lock().unwrap() = Some(Best{t, p, found, passed, needed, failure});
+                            *best = Some(Best{t, p, passed, needed, generator, failure});
+                            *last_best.lock().unwrap() = Some(Best{t, p, passed, needed, generator, failure});
                         }
                         cached_best = best.as_ref().map(|best| best.passed).unwrap_or(0);
 
@@ -276,7 +474,7 @@ fn find_irreducible() {
                         if last_best.is_none()
                             || (passed == last_best.as_ref().unwrap().passed
                                 && t >= last_best.as_ref().unwrap().t) {
-                            *last_best = Some(Best{t, p, found, passed, needed, failure});
+                            *last_best = Some(Best{t, p, passed, needed, generator, failure});
                         }
                     }
 
@@ -307,6 +505,9 @@ fn find_irreducible() {
             if let Some((x, g)) = last.failure {
                 println!("\x1b[Kfailure gcd({})", hex(&x));
                 println!("\x1b[K          = {}", hex(&g));
+            } else if let Some(g) = last.generator {
+                println!("\x1b[Kgen = {}", hex(&g));
+                println!("\x1b[K");
             } else {
                 println!("\x1b[K");
                 println!("\x1b[K");
@@ -322,6 +523,9 @@ fn find_irreducible() {
             if let Some((x, g)) = last_best.failure {
                 println!("\x1b[Kfailure gcd({})", hex(&x));
                 println!("\x1b[K          = {}", hex(&g));
+            } else if let Some(g) = last_best.generator {
+                println!("\x1b[Kgen = {}", hex(&g));
+                println!("\x1b[K");
             } else {
                 println!("\x1b[K");
                 println!("\x1b[K");
@@ -337,6 +541,9 @@ fn find_irreducible() {
             if let Some((x, g)) = best.failure {
                 println!("\x1b[Kfailure gcd({})", hex(&x));
                 println!("\x1b[K          = {}", hex(&g));
+            } else if let Some(g) = best.generator {
+                println!("\x1b[Kgen = {}", hex(&g));
+                println!("\x1b[K");
             } else {
                 println!("\x1b[K");
                 println!("\x1b[K");
