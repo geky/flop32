@@ -198,7 +198,7 @@ fn p32x256_is_irreducible(
     // Ben-Or's irreducbility test
     // https://www.math.clemson.edu/~sgao/papers/GP97a.pdf
     let mut x = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
-    for i in 0..32/2 {
+    for i in 0..(4/2)-1 {
         // find x^256^i mod a
         for _ in 0..8 {
             let (_, r) = p32x256_divrem(&p32x256_mul(&x, &x), a);
@@ -211,12 +211,36 @@ fn p32x256_is_irreducible(
         // test gcd(a, x^256^i - x mod a) == 1
         let g = p32x256_gcd(a, &x_);
 
-        if g != [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] {
-            return (false, i, 32/2, Some((x_, g)));
+        if !g[1..].iter().all(|x| *x == 0) {
+            return (false, i, 4/2, Some((x_, g)));
         }
     }
 
-    (true, 32/2, 32/2, None)
+    (true, 4/2, 4/2, None)
+}
+
+fn p32x256_is_irreducible_naive(
+    a: &[u8]
+) -> (bool, Option<([u8; 32], [u8; 32])>) {
+    let mut t: [u8; 32] = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+
+    for _ in 1..2u64.pow((4/2)*8) {
+        let (q, r) = p32x256_divrem(a, &t);
+        if r.iter().all(|x| *x == 0) {
+            return (false, Some((t, q)));
+        }
+        
+        // increment t
+        for i in 0..t.len() {
+            let (x, v) = t[i].overflowing_add(1);
+            t[i] = x;
+            if !v {
+                break;
+            }
+        }
+    }
+
+    (true, None)
 }
 
 #[test]
@@ -239,6 +263,7 @@ fn find_irreducible() {
         passed: u32,
         needed: u32,
         failure: Option<([u8; 32], [u8; 32])>,
+        failure_naive: Option<([u8; 32], [u8; 32])>,
     }
 
     use std::sync::{Arc, Mutex};
@@ -252,13 +277,18 @@ fn find_irreducible() {
             let best = best.clone();
             let last_best = last_best.clone();
             move || {
-                let mut p: [u8; 33] = [t,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1];
+                let mut p: [u8; 33] = [t,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
                 let mut cached_best = 0;
                 loop {
-                    let (found, passed, needed, failure) = p32x256_is_irreducible(&p);
+                    let (found, mut passed, needed, failure) = p32x256_is_irreducible(&p);
+                    let (found_naive, failure_naive) = p32x256_is_irreducible_naive(&p);
+                    if found_naive {
+                        passed = needed;
+                    }
+                    assert_eq!(found, found_naive);
 
                     if let Ok(mut last) = last.try_lock() {
-                        *last = Some(Best{t, p, found, passed, needed, failure});
+                        *last = Some(Best{t, p, found, passed, needed, failure, failure_naive});
                     }
 
                     if passed >= cached_best {
@@ -269,8 +299,8 @@ fn find_irreducible() {
                                 || (passed == best.as_ref().unwrap().passed
                                     && t < best.as_ref().unwrap().t)
                             {
-                                *best = Some(Best{t, p, found, passed, needed, failure});
-                                *last_best.lock().unwrap() = Some(Best{t, p, found, passed, needed, failure});
+                                *best = Some(Best{t, p, found, passed, needed, failure, failure_naive});
+                                *last_best.lock().unwrap() = Some(Best{t, p, found, passed, needed, failure, failure_naive});
                             }
                             cached_best = best.as_ref().map(|best| best.passed).unwrap_or(0);
                         }
@@ -281,7 +311,7 @@ fn find_irreducible() {
                                 || (passed == last_best.as_ref().unwrap().passed
                                     && t >= last_best.as_ref().unwrap().t)
                             {
-                                *last_best = Some(Best{t, p, found, passed, needed, failure});
+                                *last_best = Some(Best{t, p, found, passed, needed, failure, failure_naive});
                             }
                         }
                     }
@@ -317,7 +347,19 @@ fn find_irreducible() {
                 println!("\x1b[K");
                 println!("\x1b[K");
             }
+            if let Some((x, q)) = last.failure_naive {
+                println!("\x1b[K      naive {}", hex(&x));
+                println!("\x1b[K          * {}", hex(&q));
+                println!("\x1b[K          = {}", hex(&p32x256_mul(&x, &q)));
+            } else {
+                println!("\x1b[K");
+                println!("\x1b[K");
+                println!("\x1b[K");
+            }
         } else {
+            println!("\x1b[K");
+            println!("\x1b[K");
+            println!("\x1b[K");
             println!("\x1b[K");
             println!("\x1b[K");
             println!("\x1b[K");
@@ -332,7 +374,19 @@ fn find_irreducible() {
                 println!("\x1b[K");
                 println!("\x1b[K");
             }
+            if let Some((x, q)) = last_best.failure_naive {
+                println!("\x1b[K      naive {}", hex(&x));
+                println!("\x1b[K          * {}", hex(&q));
+                println!("\x1b[K          = {}", hex(&p32x256_mul(&x, &q)));
+            } else {
+                println!("\x1b[K");
+                println!("\x1b[K");
+                println!("\x1b[K");
+            }
         } else {
+            println!("\x1b[K");
+            println!("\x1b[K");
+            println!("\x1b[K");
             println!("\x1b[K");
             println!("\x1b[K");
             println!("\x1b[K");
@@ -347,14 +401,26 @@ fn find_irreducible() {
                 println!("\x1b[K");
                 println!("\x1b[K");
             }
+            if let Some((x, q)) = best.failure_naive {
+                println!("\x1b[K      naive {}", hex(&x));
+                println!("\x1b[K          * {}", hex(&q));
+                println!("\x1b[K          = {}", hex(&p32x256_mul(&x, &q)));
+            } else {
+                println!("\x1b[K");
+                println!("\x1b[K");
+                println!("\x1b[K");
+            }
         } else {
+            println!("\x1b[K");
+            println!("\x1b[K");
+            println!("\x1b[K");
             println!("\x1b[K");
             println!("\x1b[K");
             println!("\x1b[K");
         }
 
         std::thread::sleep(std::time::Duration::from_millis(10));
-        lines = 9;
+        lines = 18;
     }
 }
 
