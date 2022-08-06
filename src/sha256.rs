@@ -155,7 +155,7 @@ impl Sha256 {
     ]);
 }
 
-fn p_mul(a: &mut [u8], b: &[u8]) {
+fn p_mul<'a>(a: &'a mut [u8], b: &[u8]) -> &'a mut [u8] {
     debug_assert!(a[b.len()+1..].iter().all(|x| *x == 0));
 
     for i in (0..a.len()-b.len()+1).rev() {
@@ -166,6 +166,8 @@ fn p_mul(a: &mut [u8], b: &[u8]) {
             a[i+j] ^= gf256_mul(a_i, b[j]);
         }
     }
+
+    a
 }
 
 fn p_divrem<'a>(a: &'a mut [u8], b: &[u8]) -> (&'a mut [u8], &'a mut [u8]) {
@@ -200,7 +202,7 @@ fn p_divrem<'a>(a: &'a mut [u8], b: &[u8]) -> (&'a mut [u8], &'a mut [u8]) {
     (q, r)
 }
 
-fn p_modrecip(a: &mut [u8], p: &[u8]) {
+fn p_modrecip<'a>(a: &'a mut [u8], p: &[u8]) -> &'a mut [u8] {
     // multiplicative inverse using extended Euclidean algorithm
     let mut t0 = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
     let mut t1 = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
@@ -224,6 +226,8 @@ fn p_modrecip(a: &mut [u8], p: &[u8]) {
     for i in 0..t0.len() {
         a[i] = gf256_div(t0[i], r0[0]);
     }
+
+    a
 }
 
 impl core::ops::MulAssign for Sha256 {
