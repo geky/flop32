@@ -66,14 +66,17 @@ fn mkhash<A: AsRef<[u8]>, B: AsRef<[u8]>>(
 }
 
 #[derive(Debug, Clone)]
-enum Swap {
+enum Error {
     CorruptA(usize),
     CorruptB(usize),
-    Clean(usize),
-    Parity,
+    CorruptSwapA(usize),
+    CorruptSwapB(usize),
+    CleanSwap(usize),
+    CorruptParity,
 }
 
-/// find where we left off a swap
+/// Find where we left off a swap, along with any single block error,
+/// or a single block error at rest
 ///
 /// at some point this must be true
 ///
@@ -98,128 +101,6 @@ enum Swap {
 ///   (b = aaaa?bbbbb)
 ///
 ///
-fn find_swap<A: AsRef<[u8]>, B: AsRef<[u8]>>(
-    a: &[A],
-    b: &[B],
-    h: (Sha256, Sha256),
-) -> Option<Swap> {
-    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
-    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
-    debug_assert_eq!(a.len(), b.len());
-    let (p, q) = h;
-
-    // first thing first, do we have any errors?
-    let (mut p_, mut q_) = mkhash(&a, &b);
-    if p_ == p && q_ == q {
-        return None;
-    }
-
-    // subtract from p and q
-    p_ = p - p_;
-    q_ = q - q_;
-
-    // scan again trying to find the point where we left off the swap
-    let mut g0 = Sha256::one();
-    let mut g1 = g0 * Sha256::G;
-    for i in 0..a.len() {
-        let a_hash = hash(i, a[i].as_ref());
-        let b_hash = hash(i, b[i].as_ref());
-
-        // a[x] = swap?
-        if a_hash == p_ - ((q_ - a_hash*g0) / g0) {
-            // a[x] = corrupt?
-            if p_ != Sha256::zero() {
-                return Some(Swap::CorruptA(i));
-            } else {
-                return Some(Swap::Clean(i));
-            }
-        }
-
-        // b[x] = swap?
-        if b_hash == p_ - ((q_ - a_hash*(g1-g0) - b_hash*g1) / g0) {
-            // b[x] = corrupt?
-            if p_ != Sha256::zero() {
-                return Some(Swap::CorruptB(i));
-            }
-        }
-
-        // move on to next block, need to update q assuming a and b
-        // have been swapped
-        q_ += (b_hash-a_hash)*g0 + (a_hash-b_hash)*g1;
-
-        g0 = g1 * Sha256::G;
-        g1 = g0 * Sha256::G;
-    }
-
-    // if we reach here our parity hashes must be corrupt
-    Some(Swap::Parity)
-}
-
-fn fix_swap<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
-    a: &mut [A],
-    b: &mut [B],
-    p: &[u8],
-    h: (Sha256, Sha256),
-) -> bool {
-    debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
-    debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
-    debug_assert_eq!(a.len(), b.len());
-    debug_assert_eq!(p.len(), BLOCK_SIZE);
-
-    // fix corruptions?
-    let i = match find_swap(a, b, h) {
-        Some(Swap::CorruptA(i)) => {
-            a[i].as_mut().copy_from_slice(p);
-            for i_ in 0..a.len() {
-                for j in 0..BLOCK_SIZE {
-                    if i_ != i {
-                        a[i].as_mut()[j] ^= a[i_].as_ref()[j];
-                    }
-                    a[i].as_mut()[j] ^= b[i_].as_ref()[j];
-                }
-            }
-            i
-        }
-        Some(Swap::CorruptB(i)) => {
-            b[i].as_mut().copy_from_slice(p);
-            for i_ in 0..a.len() {
-                for j in 0..BLOCK_SIZE {
-                    b[i].as_mut()[j] ^= a[i_].as_ref()[j];
-                    if i_ != i {
-                        b[i].as_mut()[j] ^= b[i_].as_ref()[j];
-                    }
-                }
-            }
-            i+1
-        }
-        Some(Swap::Clean(i)) => {
-            i
-        }
-        Some(Swap::Parity) => {
-            a.len()
-        }
-        None => {
-            return false;
-        }
-    };
-
-    // finish swap
-    for i in i..a.len() {
-        b[i].as_mut().swap_with_slice(a[i].as_mut());
-    }
-
-    true
-}
-
-
-#[derive(Debug, Clone)]
-enum Error {
-    CorruptA(usize),
-    CorruptB(usize),
-    Parity,
-}
-
-/// Find a single-block error
 fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     a: &[A],
     b: &[B],
@@ -239,6 +120,7 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     // subtract from p and q
     p_ = p - p_;
     q_ = q - q_;
+    let mut q_swapped = q_;
 
     // scan again trying to find the point where we left off the swap
     let mut g0 = Sha256::one();
@@ -246,6 +128,24 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
         let b_hash = hash(i, b[i].as_ref());
+
+        // a[x] = swap?
+        if a_hash == p_ - ((q_swapped - a_hash*g0) / g0) {
+            // a[x] = corrupt?
+            if p_ != Sha256::zero() {
+                return Some(Error::CorruptSwapA(i));
+            } else {
+                return Some(Error::CleanSwap(i));
+            }
+        }
+
+        // b[x] = swap?
+        if b_hash == p_ - ((q_swapped - a_hash*(g1-g0) - b_hash*g1) / g0) {
+            // b[x] = corrupt?
+            if p_ != Sha256::zero() {
+                return Some(Error::CorruptSwapB(i));
+            }
+        }
 
         // a[x] = error?
         if a_hash == p_ - ((q_ - a_hash*g0) / g0) {
@@ -257,12 +157,16 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
             return Some(Error::CorruptB(i));
         }
 
+        // move on to next block, need to update q assuming a and b
+        // have been swapped
+        q_swapped += (b_hash-a_hash)*g0 + (a_hash-b_hash)*g1;
+
         g0 = g1 * Sha256::G;
         g1 = g0 * Sha256::G;
     }
 
     // if we reach here our parity hashes must be corrupt
-    Some(Error::Parity)
+    Some(Error::CorruptParity)
 }
 
 fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
@@ -276,9 +180,17 @@ fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
     debug_assert_eq!(a.len(), b.len());
     debug_assert_eq!(p.len(), BLOCK_SIZE);
 
+    // find error
+    let error = match find_error(a, b, h) {
+        Some(error) => error,
+        None => {
+            return false;
+        }
+    };
+
     // fix corruptions?
-    match find_error(a, b, h) {
-        Some(Error::CorruptA(i)) => {
+    match error {
+        Error::CorruptA(i) | Error::CorruptSwapA(i) => {
             a[i].as_mut().copy_from_slice(p);
             for i_ in 0..a.len() {
                 for j in 0..BLOCK_SIZE {
@@ -288,9 +200,8 @@ fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
                     a[i].as_mut()[j] ^= b[i_].as_ref()[j];
                 }
             }
-            true
         }
-        Some(Error::CorruptB(i)) => {
+        Error::CorruptB(i) | Error::CorruptSwapB(i) => {
             b[i].as_mut().copy_from_slice(p);
             for i_ in 0..a.len() {
                 for j in 0..BLOCK_SIZE {
@@ -300,15 +211,23 @@ fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
                     }
                 }
             }
-            true
         }
-        Some(Error::Parity) => {
-            true
-        }
-        None => {
-            false
+        _ => {}
+    }
+
+    // finish swap?
+    if let Some(i) = match error {
+        Error::CorruptSwapA(i) => Some(i),
+        Error::CorruptSwapB(i) => Some(i+1),
+        Error::CleanSwap(i)    => Some(i),
+        _                      => None,
+    } {
+        for i in i..a.len() {
+            b[i].as_mut().swap_with_slice(a[i].as_mut());
         }
     }
+
+    true
 }
 
 
@@ -414,7 +333,7 @@ fn main() {
 
     println!("before:");
     println!("{}", blocks(&a, &b, &p, h));
-    println!("swap = {:?}", find_swap(&a, &b, h));
+    println!("swap = {:?}", find_error(&a, &b, h));
 
     let mut a_ = a;
     let mut b_ = b;
@@ -422,7 +341,7 @@ fn main() {
     std::mem::swap(&mut a_[1], &mut b_[1]);
     println!("clean swap:");
     println!("{}", blocks(&a_, &b_, &p, h));
-    println!("swap = {:?}", find_swap(&a_, &b_, h));
+    println!("swap = {:?}", find_error(&a_, &b_, h));
 
     let mut a_ = a;
     let mut b_ = b;
@@ -431,7 +350,7 @@ fn main() {
     a_[2].fill(0xff);
     println!("dirty a swap:");
     println!("{}", blocks(&a_, &b_, &p, h));
-    println!("swap = {:?}", find_swap(&a_, &b_, h));
+    println!("swap = {:?}", find_error(&a_, &b_, h));
 
     let mut a_ = a;
     let mut b_ = b;
@@ -440,7 +359,7 @@ fn main() {
     a_[2] = b_[2];
     println!("half swap:");
     println!("{}", blocks(&a_, &b_, &p, h));
-    println!("swap = {:?}", find_swap(&a_, &b_, h));
+    println!("swap = {:?}", find_error(&a_, &b_, h));
 
     let mut a_ = a;
     let mut b_ = b;
@@ -450,7 +369,7 @@ fn main() {
     b_[2].fill(0xff);
     println!("dirty b swap:");
     println!("{}", blocks(&a_, &b_, &p, h));
-    println!("swap = {:?}", find_swap(&a_, &b_, h));
+    println!("swap = {:?}", find_error(&a_, &b_, h));
 
     let mut a_ = a;
     let mut b_ = b;
@@ -459,7 +378,7 @@ fn main() {
     std::mem::swap(&mut a_[2], &mut b_[2]);
     println!("clean swap:");
     println!("{}", blocks(&a_, &b_, &p, h));
-    println!("swap = {:?}", find_swap(&a_, &b_, h));
+    println!("swap = {:?}", find_error(&a_, &b_, h));
 
     println!();
 
@@ -534,9 +453,9 @@ fn main() {
     for (i, (mut a_, mut b_)) in swap(&a, &b).enumerate() {
         writeln!(log, "step {}:", i).unwrap();
         writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
-        writeln!(log, "found = {:?}", find_swap(&a_, &b_, h)).unwrap();
+        writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
-        fix_swap(&mut a_, &mut b_, &p, h);
+        fix_error(&mut a_, &mut b_, &p, h);
         writeln!(log, "fixed:").unwrap();
         writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
         log.reset();
@@ -591,13 +510,9 @@ fn main() {
 
             writeln!(log, "step {}:", i).unwrap();
             writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
-            writeln!(log, "found = {:?} {:?}",
-                find_error(&a_, &b_, h),
-                find_swap(&a_, &b_, h),
-            ).unwrap();
+            writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
             fix_error(&mut a_, &mut b_, &p, h);
-            fix_swap(&mut a_, &mut b_, &p, h);
             writeln!(log, "fixed:").unwrap();
             writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
             log.reset();
@@ -615,13 +530,9 @@ fn main() {
 
             writeln!(log, "error {}:", i).unwrap();
             writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
-            writeln!(log, "found = {:?} {:?}",
-                find_error(&a_, &b_, h),
-                find_swap(&a_, &b_, h),
-            ).unwrap();
+            writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
             fix_error(&mut a_, &mut b_, &p, h);
-            fix_swap(&mut a_, &mut b_, &p, h);
             writeln!(log, "fixed:").unwrap();
             writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
             log.reset();
