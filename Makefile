@@ -4,9 +4,13 @@
 all build:
 	cargo build
 
-.PHONY: run test
-run test:
+.PHONY: run
+run:
 	cargo run
+
+.PHONY: test
+test:
+	cargo test
 
 .PHONY: clean
 clean:
