@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 
-mod sha256;
-use sha256::Sha256;
+mod sha256_algebra;
+use sha256_algebra::sha256;
 
 
 const BLOCK_SIZE: usize = 8;
@@ -29,7 +29,7 @@ fn mkparity<A: AsRef<[u8]>, B: AsRef<[u8]>>(
 
 /// hash a block
 /// h = H(index | block)
-fn hash(i: usize, a: &[u8]) -> Sha256 {
+fn hash(i: usize, a: &[u8]) -> sha256 {
     [
         u32::try_from(i).unwrap()
             .to_le_bytes()
@@ -44,22 +44,22 @@ fn hash(i: usize, a: &[u8]) -> Sha256 {
 fn mkhash<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     a: &[A],
     b: &[B],
-) -> (Sha256, Sha256) {
+) -> (sha256, sha256) {
     debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert_eq!(a.len(), b.len());
 
-    let mut p = Sha256::ZERO;
-    let mut q = Sha256::ZERO;
-    let mut g0 = Sha256::ONE;
-    let mut g1 = g0 * Sha256::G;
+    let mut p = sha256::ZERO;
+    let mut q = sha256::ZERO;
+    let mut g0 = sha256::ONE;
+    let mut g1 = g0 * sha256::G;
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
         let b_hash = hash(i, b[i].as_ref());
         p += a_hash + b_hash;
         q += a_hash*g0 + b_hash*g1;
-        g0 = g1 * Sha256::G;
-        g1 = g0 * Sha256::G;
+        g0 = g1 * sha256::G;
+        g1 = g0 * sha256::G;
     }
 
     (p, q)
@@ -104,7 +104,7 @@ enum Error {
 fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     a: &[A],
     b: &[B],
-    h: (Sha256, Sha256),
+    h: (sha256, sha256),
 ) -> Option<Error> {
     debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
@@ -123,8 +123,8 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     let mut q_swapped = q_;
 
     // scan again trying to find the point where we left off the swap
-    let mut g0 = Sha256::ONE;
-    let mut g1 = g0 * Sha256::G;
+    let mut g0 = sha256::ONE;
+    let mut g1 = g0 * sha256::G;
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
         let b_hash = hash(i, b[i].as_ref());
@@ -132,7 +132,7 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
         // a[x] = swap?
         if a_hash == p_ - ((q_swapped - a_hash*g0) / g0) {
             // a[x] = corrupt?
-            if p_ != Sha256::ZERO {
+            if p_ != sha256::ZERO {
                 return Some(Error::CorruptSwapA(i));
             } else {
                 return Some(Error::CleanSwap(i));
@@ -142,7 +142,7 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
         // b[x] = swap?
         if b_hash == p_ - ((q_swapped - a_hash*(g1-g0) - b_hash*g1) / g0) {
             // b[x] = corrupt?
-            if p_ != Sha256::ZERO {
+            if p_ != sha256::ZERO {
                 return Some(Error::CorruptSwapB(i));
             }
         }
@@ -161,8 +161,8 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
         // have been swapped
         q_swapped += (b_hash-a_hash)*g0 + (a_hash-b_hash)*g1;
 
-        g0 = g1 * Sha256::G;
-        g1 = g0 * Sha256::G;
+        g0 = g1 * sha256::G;
+        g1 = g0 * sha256::G;
     }
 
     // if we reach here our parity hashes must be corrupt
@@ -173,7 +173,7 @@ fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
     a: &mut [A],
     b: &mut [B],
     p: &[u8],
-    h: (Sha256, Sha256),
+    h: (sha256, sha256),
 ) -> bool {
     debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
@@ -294,7 +294,7 @@ fn main() {
         a: &[A],
         b: &[B],
         p: &[u8],
-        h: (Sha256, Sha256)
+        h: (sha256, sha256)
     ) -> String {
         let mut buf = vec![];
         writeln!(buf, "\x1b[Ka = {} p = {}",

@@ -4,29 +4,31 @@ use sha2::Digest;
 use core::cmp::min;
 
 
-/// A sha256 type with GF(256) operations
+/// A sha256 type with GF(256^32) operations
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sha256(pub [u8; 32]);
+#[allow(non_camel_case_types)]
+#[repr(transparent)]
+pub struct sha256(pub [u8; 32]);
 
-impl Sha256 {
-    pub const ZERO: Sha256 = Sha256([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    pub const ONE: Sha256 = Sha256([1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
+impl sha256 {
+    pub const ZERO: sha256 = sha256([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
+    pub const ONE: sha256 = sha256([1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
 
-    /// The irreducible polynomial defining the field.
+    /// The irreducible polynomial defining the field
     pub const P: [u8; 33] = [
         0x6f,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
         0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
         0x01,
     ];
 
-    /// A generator in the field.
-    pub const G: Sha256 = Sha256([
+    /// A generator in the field
+    pub const G: sha256 = sha256([
         0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
         0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     ]);
 }
 
-impl core::fmt::Display for Sha256 {
+impl core::fmt::Display for sha256 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         for x in self.0.iter() {
             write!(f, "{:02x}", x)?;
@@ -35,13 +37,13 @@ impl core::fmt::Display for Sha256 {
     }
 }
 
-impl<'a> core::iter::FromIterator<&'a [u8]> for Sha256 {
+impl<'a> core::iter::FromIterator<&'a [u8]> for sha256 {
     fn from_iter<T: IntoIterator<Item=&'a [u8]>>(iter: T) -> Self {
         let mut hasher = sha2::Sha256::new();
         for x in iter {
             hasher.update(x);
         }
-        Sha256(hasher.finalize().into())
+        sha256(hasher.finalize().into())
     }
 }
 
@@ -53,43 +55,43 @@ fn p_xor(a: &mut [u8], b: &[u8]) {
     }
 }
 
-impl core::ops::BitXorAssign for Sha256 {
-    fn bitxor_assign(&mut self, other: Sha256) {
+impl core::ops::BitXorAssign for sha256 {
+    fn bitxor_assign(&mut self, other: sha256) {
         p_xor(&mut self.0, &other.0);
     }
 }
 
-impl core::ops::AddAssign for Sha256 {
-    fn add_assign(&mut self, other: Sha256) {
+impl core::ops::AddAssign for sha256 {
+    fn add_assign(&mut self, other: sha256) {
         p_xor(&mut self.0, &other.0);
     }
 }
 
-impl core::ops::SubAssign for Sha256 {
-    fn sub_assign(&mut self, other: Sha256) {
+impl core::ops::SubAssign for sha256 {
+    fn sub_assign(&mut self, other: sha256) {
         p_xor(&mut self.0, &other.0);
     }
 }
 
-impl core::ops::BitXor for Sha256 {
-    type Output = Sha256;
-    fn bitxor(mut self, other: Sha256) -> Sha256 {
+impl core::ops::BitXor for sha256 {
+    type Output = sha256;
+    fn bitxor(mut self, other: sha256) -> sha256 {
         self ^= other;
         self
     }
 }
 
-impl core::ops::Add for Sha256 {
-    type Output = Sha256;
-    fn add(mut self, other: Sha256) -> Sha256 {
+impl core::ops::Add for sha256 {
+    type Output = sha256;
+    fn add(mut self, other: sha256) -> sha256 {
         self += other;
         self
     }
 }
 
-impl core::ops::Sub for Sha256 {
-    type Output = Sha256;
-    fn sub(mut self, other: Sha256) -> Sha256 {
+impl core::ops::Sub for sha256 {
+    type Output = sha256;
+    fn sub(mut self, other: sha256) -> sha256 {
         self -= other;
         self
     }
@@ -223,8 +225,8 @@ fn p_modrecip<'a>(a: &'a mut [u8], p: &[u8]) -> &'a mut [u8] {
     a
 }
 
-impl core::ops::MulAssign for Sha256 {
-    fn mul_assign(&mut self, other: Sha256) {
+impl core::ops::MulAssign for sha256 {
+    fn mul_assign(&mut self, other: sha256) {
         let mut x = [0; 64];
         x[..32].copy_from_slice(&self.0);
 
@@ -235,8 +237,8 @@ impl core::ops::MulAssign for Sha256 {
     }
 }
 
-impl core::ops::DivAssign for Sha256 {
-    fn div_assign(&mut self, other: Sha256) {
+impl core::ops::DivAssign for sha256 {
+    fn div_assign(&mut self, other: sha256) {
         let mut x = [0; 64];
         x[..32].copy_from_slice(&other.0);
 
@@ -248,17 +250,17 @@ impl core::ops::DivAssign for Sha256 {
     }
 }
 
-impl core::ops::Mul for Sha256 {
-    type Output = Sha256;
-    fn mul(mut self, other: Sha256) -> Sha256 {
+impl core::ops::Mul for sha256 {
+    type Output = sha256;
+    fn mul(mut self, other: sha256) -> sha256 {
         self *= other;
         self
     }
 }
 
-impl core::ops::Div for Sha256 {
-    type Output = Sha256;
-    fn div(mut self, other: Sha256) -> Sha256 {
+impl core::ops::Div for sha256 {
+    type Output = sha256;
+    fn div(mut self, other: sha256) -> sha256 {
         self /= other;
         self
     }
@@ -269,19 +271,19 @@ impl core::ops::Div for Sha256 {
 #[cfg(test)]
 mod test {
     use super::*;
-    const XS: &[Sha256] = &[
-         Sha256([1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
-         Sha256([0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
-         Sha256([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]),
-         Sha256([7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
-         Sha256([0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
-         Sha256([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7]),
-         Sha256([17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17]),
-         Sha256([34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34]),
-         Sha256([51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51]),
-         Sha256([0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff]),
-         Sha256([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff]),
-         Sha256([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff]),
+    const XS: &[sha256] = &[
+         sha256([1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
+         sha256([0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
+         sha256([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]),
+         sha256([7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
+         sha256([0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),
+         sha256([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7]),
+         sha256([17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17]),
+         sha256([34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34]),
+         sha256([51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51]),
+         sha256([0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff]),
+         sha256([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff]),
+         sha256([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff]),
     ];
 
     #[test]
@@ -301,8 +303,8 @@ mod test {
     fn test_algebra_recip() {
         for a in XS.iter().copied() {
             assert_eq!(
-                a*(Sha256::ONE/a),
-                Sha256::ONE,
+                a*(sha256::ONE/a),
+                sha256::ONE,
                 "a*(1/a) = 1"
             );
         }
