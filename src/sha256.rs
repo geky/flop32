@@ -14,7 +14,7 @@ impl Sha256 {
 
     /// The irreducible polynomial defining the field.
     pub const P: [u8; 33] = [
-        0xec,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x6f,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
         0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
         0x01,
     ];
@@ -650,7 +650,6 @@ mod test {
 // 
 //     #[derive(Debug, Clone)]
 //     struct Best {
-//         t: u8,
 //         p: [u8; 33],
 //         passed: u32,
 //         needed: u32,
@@ -686,7 +685,7 @@ mod test {
 //                     }
 // 
 //                     if let Ok(mut last) = last.try_lock() {
-//                         *last = Some(Best{t, p, passed, needed, generator, failure});
+//                         *last = Some(Best{p, passed, needed, generator, failure});
 //                     }
 // 
 //                     if passed >= cached_best {
@@ -694,18 +693,16 @@ mod test {
 //                         if best.is_none()
 //                             || passed > best.as_ref().unwrap().passed
 //                             || (passed == best.as_ref().unwrap().passed
-//                                 && t < best.as_ref().unwrap().t)
+//                                 && p.iter().rev().lt(best.as_ref().unwrap().p.iter().rev()))
 //                         {
-//                             *best = Some(Best{t, p, passed, needed, generator, failure});
-//                             *last_best.lock().unwrap() = Some(Best{t, p, passed, needed, generator, failure});
+//                             *best = Some(Best{p, passed, needed, generator, failure});
+//                             *last_best.lock().unwrap() = Some(Best{p, passed, needed, generator, failure});
 //                         }
 //                         cached_best = best.as_ref().map(|best| best.passed).unwrap_or(0);
 // 
 //                         let mut last_best = last_best.lock().unwrap();
-//                         if last_best.is_none()
-//                             || (passed == last_best.as_ref().unwrap().passed
-//                                 && t >= last_best.as_ref().unwrap().t) {
-//                             *last_best = Some(Best{t, p, passed, needed, generator, failure});
+//                         if last_best.is_none() || passed == last_best.as_ref().unwrap().passed {
+//                             *last_best = Some(Best{p, passed, needed, generator, failure});
 //                         }
 //                     }
 // 
