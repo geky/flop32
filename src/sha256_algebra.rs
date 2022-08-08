@@ -37,6 +37,12 @@ impl core::fmt::Display for sha256 {
     }
 }
 
+impl From<&[u8]> for sha256 {
+    fn from(s: &[u8]) -> Self {
+        core::iter::once(s).collect()
+    }
+}
+
 impl<'a> core::iter::FromIterator<&'a [u8]> for sha256 {
     fn from_iter<T: IntoIterator<Item=&'a [u8]>>(iter: T) -> Self {
         let mut hasher = sha2::Sha256::new();

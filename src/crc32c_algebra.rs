@@ -35,6 +35,12 @@ impl core::fmt::Display for crc32c {
     }
 }
 
+impl From<&[u8]> for crc32c {
+    fn from(s: &[u8]) -> Self {
+        core::iter::once(s).collect()
+    }
+}
+
 impl<'a> core::iter::FromIterator<&'a [u8]> for crc32c {
     fn from_iter<T: IntoIterator<Item=&'a [u8]>>(iter: T) -> Self {
         let mut crc = 0;

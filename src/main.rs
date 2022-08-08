@@ -30,17 +30,6 @@ fn mkparity<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     }
 }
 
-/// hash a block
-/// h = H(index | block)
-fn hash(i: usize, a: &[u8]) -> crc32c {
-    [
-        u32::try_from(i).unwrap()
-            .to_le_bytes()
-            .as_ref(),
-        a
-    ].into_iter().collect()
-}
-
 /// find parity hashes
 /// p = Σ a[i] + Σ a[i]
 /// q = Σ a[i] g^2i + Σ b[i] g^(2i+1)
@@ -61,8 +50,8 @@ fn mkhash<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     let mut h0 = crc32c::ONE;
     let mut h1 = h0 * crc32c::G*crc32c::G;
     for i in 0..a.len() {
-        let a_hash = hash(i, a[i].as_ref());
-        let b_hash = hash(i, b[i].as_ref());
+        let a_hash = crc32c::from(a[i].as_ref());
+        let b_hash = crc32c::from(b[i].as_ref());
         p += a_hash + b_hash;
         q += a_hash*g0 + b_hash*g1;
         r += a_hash*h0 + b_hash*h1;
@@ -140,8 +129,8 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     let mut h0 = crc32c::ONE;
     let mut h1 = h0 * crc32c::G*crc32c::G;
     for i in 0..a.len() {
-        let a_hash = hash(i, a[i].as_ref());
-        let b_hash = hash(i, b[i].as_ref());
+        let a_hash = crc32c::from(a[i].as_ref());
+        let b_hash = crc32c::from(b[i].as_ref());
 
         // a[x] = swap?
         if p_ - a_hash == ((q_swapped - a_hash*g0) / g0)
