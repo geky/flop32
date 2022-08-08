@@ -1,8 +1,11 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
 
 mod sha256_algebra;
 use sha256_algebra::sha256;
+mod crc32c_algebra;
+use crc32c_algebra::crc32c;
 
 
 const BLOCK_SIZE: usize = 8;

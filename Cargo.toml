@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 sha2 = "0.10.2"
+crc32c = "0.6.3"
