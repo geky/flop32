@@ -32,7 +32,7 @@ fn mkparity<A: AsRef<[u8]>, B: AsRef<[u8]>>(
 
 /// hash a block
 /// h = H(index | block)
-fn hash(i: usize, a: &[u8]) -> sha256 {
+fn hash(i: usize, a: &[u8]) -> crc32c {
     [
         u32::try_from(i).unwrap()
             .to_le_bytes()
@@ -44,28 +44,35 @@ fn hash(i: usize, a: &[u8]) -> sha256 {
 /// find parity hashes
 /// p = Σ a[i] + Σ a[i]
 /// q = Σ a[i] g^2i + Σ b[i] g^(2i+1)
+/// r = Σ a[i] g^4i + Σ b[i] g^(4i+2)
 fn mkhash<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     a: &[A],
     b: &[B],
-) -> (sha256, sha256) {
+) -> (crc32c, crc32c, crc32c) {
     debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert_eq!(a.len(), b.len());
 
-    let mut p = sha256::ZERO;
-    let mut q = sha256::ZERO;
-    let mut g0 = sha256::ONE;
-    let mut g1 = g0 * sha256::G;
+    let mut p = crc32c::ZERO;
+    let mut q = crc32c::ZERO;
+    let mut r = crc32c::ZERO;
+    let mut g0 = crc32c::ONE;
+    let mut g1 = g0 * crc32c::G;
+    let mut h0 = crc32c::ONE;
+    let mut h1 = h0 * crc32c::G*crc32c::G;
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
         let b_hash = hash(i, b[i].as_ref());
         p += a_hash + b_hash;
         q += a_hash*g0 + b_hash*g1;
-        g0 = g1 * sha256::G;
-        g1 = g0 * sha256::G;
+        r += a_hash*h0 + b_hash*h1;
+        g0 = g1 * crc32c::G;
+        g1 = g0 * crc32c::G;
+        h0 = h1 * crc32c::G*crc32c::G;
+        h1 = h0 * crc32c::G*crc32c::G;
     }
 
-    (p, q)
+    (p, q, r)
 }
 
 #[derive(Debug, Clone)]
@@ -107,35 +114,41 @@ enum Error {
 fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
     a: &[A],
     b: &[B],
-    h: (sha256, sha256),
+    h: (crc32c, crc32c, crc32c),
 ) -> Option<Error> {
     debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert_eq!(a.len(), b.len());
-    let (p, q) = h;
+    let (p, q, r) = h;
 
     // first thing first, do we have any errors?
-    let (mut p_, mut q_) = mkhash(&a, &b);
-    if p_ == p && q_ == q {
+    let (mut p_, mut q_, mut r_) = mkhash(&a, &b);
+    if p_ == p && q_ == q && r_ == r {
         return None;
     }
 
     // subtract from p and q
     p_ = p - p_;
     q_ = q - q_;
+    r_ = r - r_;
     let mut q_swapped = q_;
+    let mut r_swapped = r_;
 
     // scan again trying to find the point where we left off the swap
-    let mut g0 = sha256::ONE;
-    let mut g1 = g0 * sha256::G;
+    let mut g0 = crc32c::ONE;
+    let mut g1 = g0 * crc32c::G;
+    let mut h0 = crc32c::ONE;
+    let mut h1 = h0 * crc32c::G*crc32c::G;
     for i in 0..a.len() {
         let a_hash = hash(i, a[i].as_ref());
         let b_hash = hash(i, b[i].as_ref());
 
         // a[x] = swap?
-        if a_hash == p_ - ((q_swapped - a_hash*g0) / g0) {
+        if p_ - a_hash == ((q_swapped - a_hash*g0) / g0)
+            && p_ - a_hash == ((r_swapped - a_hash*h0) / h0)
+        {
             // a[x] = corrupt?
-            if p_ != sha256::ZERO {
+            if p_ != crc32c::ZERO {
                 return Some(Error::CorruptSwapA(i));
             } else {
                 return Some(Error::CleanSwap(i));
@@ -143,29 +156,38 @@ fn find_error<A: AsRef<[u8]>, B: AsRef<[u8]>>(
         }
 
         // b[x] = swap?
-        if b_hash == p_ - ((q_swapped - a_hash*(g1-g0) - b_hash*g1) / g0) {
+        if p_ - b_hash == ((q_swapped - a_hash*(g1-g0) - b_hash*g1) / g0)
+            && p_ - b_hash == ((r_swapped - a_hash*(h1-h0) - b_hash*h1) / h0)
+        {
             // b[x] = corrupt?
-            if p_ != sha256::ZERO {
+            if p_ != crc32c::ZERO {
                 return Some(Error::CorruptSwapB(i));
             }
         }
 
         // a[x] = error?
-        if a_hash == p_ - ((q_ - a_hash*g0) / g0) {
+        if p_ - a_hash == ((q_ - a_hash*g0) / g0)
+            && p_ - a_hash == ((r_ - a_hash*h0) / h0)
+        {
             return Some(Error::CorruptA(i));
         }
 
         // b[x] = error?
-        if b_hash == p_ - ((q_ - b_hash*g1) / g1) {
+        if p_ - b_hash == ((q_ - b_hash*g1) / g1)
+            && p_ - b_hash == ((r_ - b_hash*h1) / h1)
+        {
             return Some(Error::CorruptB(i));
         }
 
         // move on to next block, need to update q assuming a and b
         // have been swapped
         q_swapped += (b_hash-a_hash)*g0 + (a_hash-b_hash)*g1;
+        r_swapped += (b_hash-a_hash)*h0 + (a_hash-b_hash)*h1;
 
-        g0 = g1 * sha256::G;
-        g1 = g0 * sha256::G;
+        g0 = g1 * crc32c::G;
+        g1 = g0 * crc32c::G;
+        h0 = h1 * crc32c::G*crc32c::G;
+        h1 = h0 * crc32c::G*crc32c::G;
     }
 
     // if we reach here our parity hashes must be corrupt
@@ -176,7 +198,7 @@ fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
     a: &mut [A],
     b: &mut [B],
     p: &[u8],
-    h: (sha256, sha256),
+    h: (crc32c, crc32c, crc32c),
 ) -> bool {
     debug_assert!(a.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
     debug_assert!(b.iter().all(|x| x.as_ref().len() == BLOCK_SIZE));
@@ -225,6 +247,10 @@ fn fix_error<A: AsMut<[u8]>+AsRef<[u8]>, B: AsMut<[u8]>+AsRef<[u8]>>(
         Error::CleanSwap(i)    => Some(i),
         _                      => None,
     } {
+        if i == 0 {
+            return true;
+        }
+
         for i in i..a.len() {
             b[i].as_mut().swap_with_slice(a[i].as_mut());
         }
@@ -297,7 +323,7 @@ fn main() {
         a: &[A],
         b: &[B],
         p: &[u8],
-        h: (sha256, sha256)
+        h: (crc32c, crc32c, crc32c)
     ) -> String {
         let mut buf = vec![];
         writeln!(buf, "\x1b[Ka = {} p = {}",
@@ -307,13 +333,14 @@ fn main() {
                 .join(" "),
             hex(p),
         ).unwrap();
-        write!(buf, "\x1b[Kb = {} h = {} {}",
+        write!(buf, "\x1b[Kb = {} h = {:08x} {:08x} {:08x}",
             b.iter()
                 .map(|x| hex(x.as_ref()))
                 .collect::<Vec<_>>()
                 .join(" "),
-            &hex(&h.0.0)[0..7],
-            &hex(&h.1.0)[0..7],
+            h.0.0,
+            h.1.0,
+            h.2.0,
         ).unwrap();
         String::from_utf8(buf).unwrap()
     }
@@ -459,8 +486,12 @@ fn main() {
         writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
         fix_error(&mut a_, &mut b_, &p, h);
+
+        let mut p_ = [0; 8];
+        mkparity(&a_, &b_, &mut p_);
+        let h_ = mkhash(&a_, &b_);
         writeln!(log, "fixed:").unwrap();
-        writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+        writeln!(log, "{}", blocks(&a_, &b_, &p_, h_)).unwrap();
         log.reset();
 
         if !((a_ == b && b_ == a) || (a_ == a && b_ == b)) {
@@ -480,8 +511,12 @@ fn main() {
         writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
         fix_error(&mut a_, &mut b_, &p, h);
+
+        let mut p_ = [0; 8];
+        mkparity(&a_, &b_, &mut p_);
+        let h_ = mkhash(&a_, &b_);
         writeln!(log, "fixed:").unwrap();
-        writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+        writeln!(log, "{}", blocks(&a_, &b_, &p_, h_)).unwrap();
         log.reset();
 
         if !((a_ == b && b_ == a) || (a_ == a && b_ == b)) {
@@ -516,8 +551,12 @@ fn main() {
             writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
             fix_error(&mut a_, &mut b_, &p, h);
+
+            let mut p_ = [0; 8];
+            mkparity(&a_, &b_, &mut p_);
+            let h_ = mkhash(&a_, &b_);
             writeln!(log, "fixed:").unwrap();
-            writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+            writeln!(log, "{}", blocks(&a_, &b_, &p_, h_)).unwrap();
             log.reset();
 
             if !((a_ == b && b_ == a) || (a_ == a && b_ == b)) {
@@ -536,8 +575,12 @@ fn main() {
             writeln!(log, "found = {:?}", find_error(&a_, &b_, h)).unwrap();
 
             fix_error(&mut a_, &mut b_, &p, h);
+
+            let mut p_ = [0; 8];
+            mkparity(&a_, &b_, &mut p_);
+            let h_ = mkhash(&a_, &b_);
             writeln!(log, "fixed:").unwrap();
-            writeln!(log, "{}", blocks(&a_, &b_, &p, h)).unwrap();
+            writeln!(log, "{}", blocks(&a_, &b_, &p_, h_)).unwrap();
             log.reset();
 
             if !((a_ == b && b_ == a) || (a_ == a && b_ == b)) {
